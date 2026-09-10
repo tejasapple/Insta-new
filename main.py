@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple
 
 from aiogram import Bot, Dispatcher, Router, F
@@ -82,29 +82,51 @@ FAKE_MEMBERS_BY_MONTH = {
     "September 2026": FAKE_NAMES[78:90]  
 }
 
-def get_daily_withdrawals() -> Tuple[List[Dict[str, Any]], int]:
+async def get_daily_withdrawals() -> Tuple[List[Dict[str, Any]], int, int]:
     today = datetime.now().date()
     random.seed(today.toordinal())
     
-    num_withdrawals = random.randint(15, 18)
-    selected_names = random.sample(FAKE_NAMES, num_withdrawals)
+    # Isolate strictly fake names to exclude ANY admin-added user profiles
+    real_users_cursor = users_col.find({"is_active": True})
+    real_users = await real_users_cursor.to_list(length=1000)
+    real_names = {str(u.get("first_name", "")).strip().lower() for u in real_users}
     
-    withdrawals = []
-    total_amount = 0
+    available_names = [n for n in FAKE_NAMES if n.strip().lower() not in real_names]
+    if len(available_names) < 20:
+        available_names = FAKE_NAMES  # Safe fallback to prevent crash if real names consume too many
+        
+    # Today's detailed withdrawal list
+    num_today = random.randint(15, 20)
+    selected_today = random.sample(available_names, num_today)
     
-    for name in selected_names:
+    withdrawals_today = []
+    total_today = 0
+    
+    for name in selected_today:
         amount = random.randint(3, 10) * 1000
         hour = random.randint(9, 23)
         minute = random.randint(0, 59)
         time_str = f"{hour:02d}:{minute:02d}"
         
-        withdrawals.append({"name": name, "amount": amount, "time": time_str})
-        total_amount += amount
+        withdrawals_today.append({"name": name, "amount": amount, "time": time_str})
+        total_today += amount
     
-    withdrawals.sort(key=lambda x: x["time"])
-    random.seed()
+    withdrawals_today.sort(key=lambda x: x["time"])
     
-    return withdrawals, total_amount
+    # Calculate Last 7 Days Total Fake Value (Dynamic target: ~1 Lakh+)
+    total_7days = 0
+    for i in range(1, 8):
+        past_date = today - timedelta(days=i)
+        random.seed(past_date.toordinal())
+        num_past = random.randint(15, 20)
+        selected_past = random.sample(available_names, num_past)
+        for _ in selected_past:
+            total_7days += random.randint(3, 10) * 1000
+            
+    total_7days += total_today
+    random.seed()  # Reset global random seed
+    
+    return withdrawals_today, total_today, total_7days
 
 # ==========================================
 # DATABASE HELPER FUNCTIONS
@@ -120,10 +142,8 @@ async def get_user(user_id: int) -> Dict[str, Any]:
 
 async def register_user_if_not_exists(user_id: int, username: str, first_name: str) -> None:
     try:
-        # Check if pre-registered via ID
         existing_by_id = await users_col.find_one({"user_id": user_id})
         if existing_by_id:
-            # If user was added by admin using ID, their first_name is stored as their ID temporarily.
             if existing_by_id.get("first_name") == str(user_id) or not existing_by_id.get("username"):
                 await users_col.update_one(
                     {"user_id": user_id},
@@ -131,7 +151,6 @@ async def register_user_if_not_exists(user_id: int, username: str, first_name: s
                 )
             return
 
-        # Check if pre-registered via Username / Link
         existing_by_username = None
         if username:
             existing_by_username = await users_col.find_one({"username": {"$regex": f"^{username}$", "$options": "i"}})
@@ -143,7 +162,6 @@ async def register_user_if_not_exists(user_id: int, username: str, first_name: s
             )
             return
 
-        # Standard new user registration
         await users_col.insert_one({
             "user_id": user_id,
             "username": username,
@@ -175,21 +193,25 @@ async def get_bot_settings() -> Dict[str, str]:
 # ==========================================
 
 class WorkSubmission(StatesGroup):
-    waiting_for_link = State()
+    waiting_for_link1 = State()
+    waiting_for_link2 = State()
     waiting_for_photo = State()
+    waiting_for_views = State()
 
 class AdminStates(StatesGroup):
     waiting_for_work_link = State()
     waiting_for_proof_link = State()
     waiting_for_user_query = State()
     waiting_for_add_user = State()
+    waiting_for_submission_balance = State()
+    waiting_for_add_balance_amount = State()
+    waiting_for_remove_balance_amount = State()
 
 # ==========================================
 # KEYBOARDS
 # ==========================================
 
 def get_main_menu_keyboard(work_link: str, proof_link: str, is_admin: bool = False) -> InlineKeyboardMarkup:
-    # URL Sanitization logic to PREVENT CRASHES if admin sets an invalid link like "@username"
     def sanitize_url(url: str) -> str:
         url = url.strip()
         if url.startswith("@"):
@@ -210,18 +232,16 @@ def get_main_menu_keyboard(work_link: str, proof_link: str, is_admin: bool = Fal
             InlineKeyboardButton(text="💰 My Balance", callback_data="my_balance")
         ],
         [
-            InlineKeyboardButton(text="🟢 Apply to Work", callback_data="apply_work"),
             InlineKeyboardButton(text="📝 Submit Work", callback_data="submit_work")
         ],
         [
-            InlineKeyboardButton(text="🚀 Start Work Now", url=sanitize_url(work_link))
+            InlineKeyboardButton(text="🟢 Apply to Work", url=sanitize_url(work_link))
         ],
         [
             InlineKeyboardButton(text="🧾 Payment Screenshot Proof", url=sanitize_url(proof_link))
         ]
     ]
     
-    # Show Admin Panel button if the user is the Admin
     if is_admin:
         kb.append([InlineKeyboardButton(text="👑 Admin Panel", callback_data="open_admin_panel")])
         
@@ -237,6 +257,9 @@ def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="🔍 Check User", callback_data="admin_check_user"),
                 InlineKeyboardButton(text="📝 Pending Submissions", callback_data="admin_pending_subs")
+            ],
+            [
+                InlineKeyboardButton(text="👥 Currently Users", callback_data="admin_currently_users")
             ],
             [
                 InlineKeyboardButton(text="🔗 Set Work Link", callback_data="admin_set_work"),
@@ -260,7 +283,6 @@ async def start_cmd(message: Message, bot: Bot, state: FSMContext) -> None:
         first_name = message.from_user.first_name or "User"
         user_id = message.from_user.id
         
-        # Check existing user logic before registration for notification purpose
         existing_by_id = await users_col.find_one({"user_id": user_id})
         is_pre_registered = False
         
@@ -271,7 +293,6 @@ async def start_cmd(message: Message, bot: Bot, state: FSMContext) -> None:
 
         await register_user_if_not_exists(user_id, username, first_name)
         
-        # Notify admin for completely new users
         if not existing_by_id and not is_pre_registered and ADMIN_ID != 0:
             notify_text = f"🆕 **New User Started the Bot!**\n\n👤 Name: {first_name}\n🔗 Username: @{username}\n🆔 ID: `{user_id}`"
             await bot.send_message(ADMIN_ID, notify_text, parse_mode="Markdown")
@@ -290,11 +311,13 @@ async def start_cmd(message: Message, bot: Bot, state: FSMContext) -> None:
 @router.callback_query(F.data == "withdrawal_list")
 async def show_withdrawal_list(callback: CallbackQuery) -> None:
     try:
-        withdrawals, total_amount = get_daily_withdrawals()
+        withdrawals, total_today, total_7days = await get_daily_withdrawals()
         today_date = datetime.now().strftime("%d %B %Y")
         
-        text = f"📊 **Today's Approved Withdrawals ({today_date})**\n"
-        text += f"💰 **Total Amount Paid:** ₹{total_amount:,}\n\n"
+        text = f"📊 **Approved Withdrawals**\n\n"
+        text += f"📅 **Last 7 Days Total:** ₹{total_7days:,}\n"
+        text += f"💵 **Today's Total ({today_date}):** ₹{total_today:,}\n\n"
+        text += f"📜 **Today's Recent Payments:**\n"
         
         for w in withdrawals:
             text += f"✅ **{w['name']}** - ₹{w['amount']:,} at {w['time']}\n"
@@ -319,7 +342,6 @@ async def show_active_members(callback: CallbackQuery) -> None:
                 text += f"📅 **{month} (Total: {total_sept} Members)**\n"
                 combined_names = names.copy()
                 for u in real_users:
-                    # Will display pre-registered names cleanly
                     combined_names.append(u.get("first_name", "User"))
                 text += ", ".join(combined_names) + "\n\n"
             else:
@@ -332,24 +354,10 @@ async def show_active_members(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error(f"Error in active_members: {e}")
 
-@router.callback_query(F.data == "apply_work")
-async def apply_for_work(callback: CallbackQuery) -> None:
-    try:
-        text = (
-            "📝 **Apply for Work**\n\n"
-            "To join our team and start running Instagram ads, please contact our Admin or wait for your account to be manually approved."
-        )
-        await callback.answer("Application request noted!", show_alert=False)
-        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="back_to_menu")]]
-        ))
-    except Exception as e:
-        logger.error(f"Error in apply_work: {e}")
-
 @router.callback_query(F.data == "my_balance")
 async def show_balance(callback: CallbackQuery) -> None:
     try:
-        user = await get_user(callback.from_user.id)
+        user = await get_user(callback.fromuser.id if hasattr(callback, 'from_user') else callback.from_user.id)
         balance = user.get("balance", 0)
         text = (
             f"💰 **My Wallet Balance**\n\n"
@@ -389,24 +397,20 @@ async def handle_withdraw_method(callback: CallbackQuery) -> None:
     try:
         user = await get_user(callback.from_user.id)
         
-        # 1. Normal user logic (Access Denied)
         if not user or not user.get("is_active"):
             await callback.answer("🚫 Access Denied!\n\nYou are not a verified member in our working list.", show_alert=True)
             return
             
-        # 2. Approved member logic
         approval_date = user.get("approval_date")
         if not approval_date:
             approval_date = user.get("join_date")
             
         delta = datetime.now() - approval_date
         
-        # 3 Days Limit
         if delta.days < 3:
             await callback.answer(f"⏳ You need to wait 3 days after joining to withdraw.\n\nYour account has been active for {delta.days} day(s).", show_alert=True)
             return
             
-        # 3000 Minimum Limit
         balance = user.get("balance", 0)
         if balance < 3000:
             await callback.answer(f"❌ Minimum withdrawal is ₹3000.\n\nYour current balance is ₹{balance}.", show_alert=True)
@@ -427,62 +431,75 @@ async def submit_work_start(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         user = await get_user(callback.from_user.id)
         if not user or not user.get("is_active"):
-            await callback.answer("🚫 Work Access Denied!\n\nPlease apply for work first to submit proofs.", show_alert=True)
+            await callback.answer("🚫 Work Access Denied!\n\nPlease wait for admin approval to submit work.", show_alert=True)
             return
             
-        await state.set_state(WorkSubmission.waiting_for_link)
+        await state.set_state(WorkSubmission.waiting_for_link1)
         
         cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Cancel Submission", callback_data="back_to_menu")]
         ])
         
         await callback.message.edit_text(
-            "📝 **Work Submission Panel**\n\nPlease send your **Instagram Link** below:",
+            "📝 **Work Submission Panel**\n\nPlease send your **First Channel Link** below:",
             reply_markup=cancel_kb
         )
     except Exception as e:
         logger.error(f"Error in submit_work: {e}")
 
-@router.message(WorkSubmission.waiting_for_link)
-async def process_work_link(message: Message, state: FSMContext) -> None:
+@router.message(WorkSubmission.waiting_for_link1)
+async def process_work_link1(message: Message, state: FSMContext) -> None:
     try:
-        await state.update_data(link=message.text)
-        await state.set_state(WorkSubmission.waiting_for_photo)
-        await message.reply("✅ Link received!\n\nNow, please send the **Screenshot Proof** (as a Photo).")
+        await state.update_data(link1=message.text)
+        await state.set_state(WorkSubmission.waiting_for_link2)
+        await message.reply("✅ First link received!\n\nNow, please send your **Second Channel Link**:")
     except Exception as e:
-        logger.error(f"Error in process_work_link: {e}")
+        logger.error(f"Error in process_work_link1: {e}")
+
+@router.message(WorkSubmission.waiting_for_link2)
+async def process_work_link2(message: Message, state: FSMContext) -> None:
+    try:
+        await state.update_data(link2=message.text)
+        await state.set_state(WorkSubmission.waiting_for_photo)
+        await message.reply("✅ Second link received!\n\nNow, please send the **Channel Photo** (as a Photo).")
+    except Exception as e:
+        logger.error(f"Error in process_work_link2: {e}")
 
 @router.message(WorkSubmission.waiting_for_photo, F.photo)
-async def process_work_photo(message: Message, state: FSMContext, bot: Bot) -> None:
+async def process_work_photo(message: Message, state: FSMContext) -> None:
     try:
-        data = await state.get_data()
-        link = data.get("link", "No Link")
         photo_id = message.photo[-1].file_id
+        await state.update_data(photo_id=photo_id)
+        await state.set_state(WorkSubmission.waiting_for_views)
+        await message.reply("✅ Photo received!\n\nNow, please send the **Channels View** (e.g., 6-6 reel).")
+    except Exception as e:
+        logger.error(f"Error in process_work_photo: {e}")
+
+@router.message(WorkSubmission.waiting_for_views)
+async def process_work_views(message: Message, state: FSMContext) -> None:
+    try:
+        views = message.text
+        data = await state.get_data()
         
-        # Save submission to Database
         sub_doc = {
             "user_id": message.from_user.id,
             "user_name": message.from_user.first_name,
-            "link": link,
-            "photo_id": photo_id,
+            "link1": data.get("link1", "N/A"),
+            "link2": data.get("link2", "N/A"),
+            "photo_id": data.get("photo_id"),
+            "views": views,
             "status": "pending",
             "timestamp": datetime.now()
         }
         await submissions_col.insert_one(sub_doc)
         
-        # Track User Usage / Update Submission Count
         await users_col.update_one(
             {"user_id": message.from_user.id},
             {"$inc": {"submission_count": 1}}
         )
         
-        await message.reply("🎉 **Work submitted successfully!**\nAdmin will review your work and update your payment manually.")
+        await message.reply("🎉 **Work submitted successfully!**\nAdmin will review your work and update your payment.")
         await state.clear()
-        
-        # Note for Admin: Notification disabled as requested. Check manually via "Pending Submissions" button.
-        # if ADMIN_ID != 0:
-        #     await bot.send_message(...)
-            
     except Exception as e:
         logger.error(f"Error saving submission: {e}")
         await message.reply("⚠️ Failed to submit work. Please try again.")
@@ -571,7 +588,6 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
     try:
         query = message.text.strip()
         
-        # Clean formatting
         if "t.me/" in query:
             query = query.split("t.me/")[-1].strip()
         elif query.startswith("@"):
@@ -586,7 +602,6 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
             user = await users_col.find_one({"username": {"$regex": f"^{query}$", "$options": "i"}})
             
         if user:
-            # Activate existing user
             await users_col.update_one(
                 {"_id": user["_id"]}, 
                 {"$set": {"is_active": True, "approval_date": datetime.now()}}
@@ -594,7 +609,6 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
             name = user.get("first_name", query)
             await message.reply(f"✅ User **{name}** is now an ACTIVE member!", reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
         else:
-            # Pre-register user so they immediately show up
             user_id = int(query) if is_digit else 0
             username = query if not is_digit else ""
             name = query
@@ -671,31 +685,248 @@ async def admin_check_user_result(message: Message, state: FSMContext) -> None:
     except Exception as e:
         logger.error(f"Error in admin_check_user_result: {e}")
 
+# --- CURRENTLY USERS LOGIC ---
+
+@router.callback_query(F.data == "admin_currently_users")
+async def admin_currently_users(callback: CallbackQuery) -> None:
+    try:
+        real_users_cursor = users_col.find({"is_active": True})
+        real_users = await real_users_cursor.to_list(length=100)
+        
+        if not real_users:
+            await callback.answer("No active assigned users found.", show_alert=True)
+            return
+            
+        kb = InlineKeyboardBuilder()
+        for u in real_users:
+            name = u.get("first_name", "User")
+            uid = u.get("user_id")
+            kb.button(text=f"👤 {name}", callback_data=f"manage_user_{uid}")
+        
+        kb.button(text="🔙 Back", callback_data="admin_cancel")
+        kb.adjust(2)
+        
+        total_added = len(real_users)
+        text = f"👥 **Currently Assigned Users**\nTotal Assigned: {total_added}\n\nSelect a user below to view their work profile and manage balance:"
+        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in admin_currently_users: {e}")
+
+@router.callback_query(F.data.startswith("manage_user_"))
+async def admin_manage_specific_user(callback: CallbackQuery) -> None:
+    try:
+        uid = int(callback.data.split("_")[-1])
+        u = await users_col.find_one({"user_id": uid})
+        if not u:
+            await callback.answer("User not found.", show_alert=True)
+            return
+            
+        subs_count = u.get('submission_count', 0)
+        balance = u.get('balance', 0)
+        
+        text = (
+            f"👤 **User Profile:** {u.get('first_name')}\n"
+            f"🆔 **ID:** `{uid}`\n"
+            f"💰 **Current Balance:** ₹{balance}\n"
+            f"📥 **Total Work Submissions:** {subs_count}\n"
+        )
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="➕ Add Balance", callback_data=f"addbal_{uid}"),
+                InlineKeyboardButton(text="➖ Remove Balance", callback_data=f"rembal_{uid}")
+            ],
+            [InlineKeyboardButton(text="🔙 Back to Users List", callback_data="admin_currently_users")]
+        ])
+        
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in manage_user: {e}")
+
+@router.callback_query(F.data.startswith("addbal_"))
+async def prompt_add_bal(callback: CallbackQuery, state: FSMContext) -> None:
+    uid = int(callback.data.split("_")[-1])
+    await state.set_state(AdminStates.waiting_for_add_balance_amount)
+    await state.update_data(target_user_id=uid)
+    await callback.message.reply("👉 Enter the numerical amount to ADD to this user's balance:")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("rembal_"))
+async def prompt_rem_bal(callback: CallbackQuery, state: FSMContext) -> None:
+    uid = int(callback.data.split("_")[-1])
+    await state.set_state(AdminStates.waiting_for_remove_balance_amount)
+    await state.update_data(target_user_id=uid)
+    await callback.message.reply("👉 Enter the numerical amount to REMOVE from this user's balance:")
+    await callback.answer()
+
+@router.message(AdminStates.waiting_for_add_balance_amount)
+async def execute_add_bal(message: Message, state: FSMContext) -> None:
+    try:
+        amount = int(message.text.strip())
+        data = await state.get_data()
+        uid = data.get("target_user_id")
+        await users_col.update_one({"user_id": uid}, {"$inc": {"balance": amount}})
+        await message.reply(f"✅ ₹{amount} added to user `{uid}`.", reply_markup=get_admin_panel_keyboard())
+        await state.clear()
+    except ValueError:
+        await message.reply("⚠️ Invalid format. Please send numbers only.")
+
+@router.message(AdminStates.waiting_for_remove_balance_amount)
+async def execute_rem_bal(message: Message, state: FSMContext) -> None:
+    try:
+        amount = int(message.text.strip())
+        data = await state.get_data()
+        uid = data.get("target_user_id")
+        await users_col.update_one({"user_id": uid}, {"$inc": {"balance": -amount}})
+        await message.reply(f"✅ ₹{amount} removed from user `{uid}`.", reply_markup=get_admin_panel_keyboard())
+        await state.clear()
+    except ValueError:
+        await message.reply("⚠️ Invalid format. Please send numbers only.")
+
+# --- PENDING SUBMISSIONS LOGIC ---
+
 @router.callback_query(F.data == "admin_pending_subs")
 async def admin_show_pending_subs(callback: CallbackQuery) -> None:
     try:
-        subs = await submissions_col.find({"status": "pending"}).to_list(50)
-        if not subs:
+        pipeline = [
+            {"$match": {"status": "pending"}},
+            {"$group": {
+                "_id": "$user_id",
+                "user_name": {"$first": "$user_name"},
+                "count": {"$sum": 1}
+            }}
+        ]
+        subs_cursor = submissions_col.aggregate(pipeline)
+        grouped_subs = await subs_cursor.to_list(length=50)
+        
+        if not grouped_subs:
             await callback.answer("✅ No pending work submissions.", show_alert=True)
             return
             
         kb = InlineKeyboardBuilder()
-        for s in subs:
-            kb.button(text=f"📄 {s.get('user_name', 'User')}", callback_data=f"view_sub_{str(s['_id'])}")
+        for s in grouped_subs:
+            kb.button(text=f"📄 {s['user_name']} ({s['count']} pending)", callback_data=f"view_user_subs_{s['_id']}")
         
         kb.button(text="🔙 Back to Panel", callback_data="admin_cancel")
         kb.adjust(1)
         
-        await callback.message.edit_text("📋 **Pending Work Submissions:**\nClick on a name to view their submitted link and screenshot:", reply_markup=kb.as_markup(), parse_mode="Markdown")
+        await callback.message.edit_text("📋 **Pending Work Submissions:**\nClick on a user to view their grouped submissions:", reply_markup=kb.as_markup(), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in admin_pending_subs: {e}")
+
+@router.callback_query(F.data.startswith("view_user_subs_"))
+async def admin_view_user_subs(callback: CallbackQuery, bot: Bot) -> None:
+    try:
+        user_id = int(callback.data.split("_")[-1])
+        sub = await submissions_col.find_one({"user_id": user_id, "status": "pending"}, sort=[("timestamp", 1)])
+        if not sub:
+            await callback.answer("⚠️ No more pending submissions for this user.", show_alert=True)
+            return
+        
+        l1 = sub.get('link1', sub.get('link', 'N/A'))
+        l2 = sub.get('link2', 'N/A')
+        v = sub.get('views', 'N/A')
+        
+        caption_text = (
+            f"👤 **User:** {sub.get('user_name')}\n"
+            f"🆔 **ID:** `{sub.get('user_id')}`\n"
+            f"🔗 **Channel 1:** {l1}\n"
+            f"🔗 **Channel 2:** {l2}\n"
+            f"👁️ **Views:** {v}\n"
+        )
+        
+        sub_id = str(sub["_id"])
+        action_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Mark Checked & Add Balance", callback_data=f"clear_and_add_{sub_id}")]
+        ])
+        
+        photo_id = sub.get("photo_id")
+        if photo_id:
+            await bot.send_photo(
+                chat_id=callback.from_user.id,
+                photo=photo_id,
+                caption=caption_text,
+                reply_markup=action_kb,
+                parse_mode="Markdown"
+            )
+        else:
+            await bot.send_message(
+                chat_id=callback.from_user.id,
+                text=caption_text,
+                reply_markup=action_kb,
+                parse_mode="Markdown"
+            )
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Error opening user submission: {e}")
+
+@router.callback_query(F.data.startswith("clear_and_add_"))
+async def admin_clear_and_add_balance(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        sub_id = callback.data.split("_")[-1]
+        sub = await submissions_col.find_one({"_id": ObjectId(sub_id)})
+        if not sub:
+            await callback.answer("Submission already cleared.", show_alert=True)
+            return
+            
+        await submissions_col.update_one(
+            {"_id": ObjectId(sub_id)},
+            {"$set": {"status": "checked"}}
+        )
+        
+        user_id = sub["user_id"]
+        
+        await state.set_state(AdminStates.waiting_for_submission_balance)
+        await state.update_data(target_user_id=user_id)
+        
+        prompt_text = "\n\n✅ **STATUS: CHECKED**\n\n👉 **Please type how much balance to add for this successful task:**"
+        
+        if callback.message.caption:
+            await callback.message.edit_caption(
+                caption=callback.message.caption + prompt_text,
+                reply_markup=None
+            )
+        else:
+            await callback.message.edit_text(
+                text=callback.message.text + prompt_text,
+                reply_markup=None
+            )
+        await callback.answer("Cleared! Enter balance now.")
+    except Exception as e:
+        logger.error(f"Error in clear_and_add: {e}")
+
+@router.message(AdminStates.waiting_for_submission_balance)
+async def process_submission_balance(message: Message, state: FSMContext) -> None:
+    try:
+        if not message.text:
+            await message.reply("⚠️ Please enter a valid numerical amount.")
+            return
+        
+        amount = int(message.text.strip())
+        data = await state.get_data()
+        target_id = data.get("target_user_id")
+        
+        if target_id:
+            await users_col.update_one(
+                {"user_id": target_id},
+                {"$inc": {"balance": amount}}
+            )
+            await message.reply(f"✅ Successfully added ₹{amount} to User `{target_id}`'s balance.", parse_mode="Markdown")
+        await state.clear()
+    except ValueError:
+        await message.reply("⚠️ Please enter a valid number (e.g., 500).")
+    except Exception as e:
+        logger.error(f"Error adding sub balance: {e}")
+        await state.clear()
+
+# --- OTHER ADMIN PANEL COMMANDS ---
 
 @router.callback_query(F.data == "admin_set_work")
 async def admin_set_work_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         await state.set_state(AdminStates.waiting_for_work_link)
         cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel")]])
-        await callback.message.edit_text("🔗 **Set Work Link**\n\nPlease send the new URL for the 'Start Work Now' button:", reply_markup=cancel_kb, parse_mode="Markdown")
+        await callback.message.edit_text("🔗 **Set Work Link**\n\nPlease send the new URL for the 'Apply to Work' button:", reply_markup=cancel_kb, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in admin_set_work_prompt: {e}")
 
@@ -708,7 +939,7 @@ async def admin_set_work_save(message: Message, state: FSMContext) -> None:
             {"$set": {"work_link": new_link}},
             upsert=True
         )
-        await message.reply(f"✅ 'Start Work Now' button link updated successfully!\n\nNew Link: {new_link}", reply_markup=get_admin_panel_keyboard())
+        await message.reply(f"✅ 'Apply to Work' button link updated successfully!\n\nNew Link: {new_link}", reply_markup=get_admin_panel_keyboard())
         await state.clear()
     except Exception as e:
         logger.error(f"Error saving work link: {e}")
@@ -852,7 +1083,7 @@ async def admin_set_work_link(message: Message) -> None:
             {"$set": {"work_link": new_link}},
             upsert=True
         )
-        await message.reply(f"✅ 'Start Work Now' button link updated to: {new_link}")
+        await message.reply(f"✅ 'Apply to Work' button link updated to: {new_link}")
     except Exception as e:
         logger.error(f"Error setting work link: {e}")
 
@@ -881,68 +1112,30 @@ async def admin_view_submissions(message: Message) -> None:
         if message.from_user.id != ADMIN_ID:
             return
             
-        subs = await submissions_col.find({"status": "pending"}).to_list(50)
-        if not subs:
+        pipeline = [
+            {"$match": {"status": "pending"}},
+            {"$group": {
+                "_id": "$user_id",
+                "user_name": {"$first": "$user_name"},
+                "count": {"$sum": 1}
+            }}
+        ]
+        subs_cursor = submissions_col.aggregate(pipeline)
+        grouped_subs = await subs_cursor.to_list(length=50)
+        
+        if not grouped_subs:
             await message.reply("✅ No pending work submissions.")
             return
             
         kb = InlineKeyboardBuilder()
-        for s in subs:
-            kb.button(text=f"📄 {s.get('user_name', 'User')}", callback_data=f"view_sub_{str(s['_id'])}")
+        for s in grouped_subs:
+            kb.button(text=f"📄 {s['user_name']} ({s['count']} pending)", callback_data=f"view_user_subs_{s['_id']}")
         
         kb.adjust(1)
-        await message.reply("📋 **Pending Work Submissions:**\nClick on a name to view their submitted link and screenshot:", reply_markup=kb.as_markup())
+        await message.reply("📋 **Pending Work Submissions:**\nClick on a user to view their submissions:", reply_markup=kb.as_markup())
         
     except Exception as e:
         logger.error(f"Error loading submissions: {e}")
-
-@router.callback_query(F.data.startswith("view_sub_"))
-async def admin_open_submission(callback: CallbackQuery, bot: Bot) -> None:
-    try:
-        sub_id = callback.data.split("_")[-1]
-        sub = await submissions_col.find_one({"_id": ObjectId(sub_id)})
-        
-        if not sub:
-            await callback.answer("⚠️ Submission not found or already processed.", show_alert=True)
-            return
-            
-        caption_text = (
-            f"👤 **User:** {sub.get('user_name')}\n"
-            f"🆔 **ID:** `{sub.get('user_id')}`\n"
-            f"🔗 **Link:** {sub.get('link')}\n\n"
-            "Use `/add_balance` to manually update their payment."
-        )
-        
-        action_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Mark as Checked (Clear)", callback_data=f"clear_sub_{sub_id}")]
-        ])
-        
-        await bot.send_photo(
-            chat_id=callback.from_user.id,
-            photo=sub.get("photo_id"),
-            caption=caption_text,
-            reply_markup=action_kb,
-            parse_mode="Markdown"
-        )
-        await callback.answer()
-    except Exception as e:
-        logger.error(f"Error opening submission: {e}")
-
-@router.callback_query(F.data.startswith("clear_sub_"))
-async def admin_clear_submission(callback: CallbackQuery) -> None:
-    try:
-        sub_id = callback.data.split("_")[-1]
-        await submissions_col.update_one(
-            {"_id": ObjectId(sub_id)},
-            {"$set": {"status": "checked"}}
-        )
-        await callback.message.edit_caption(
-            caption=callback.message.caption + "\n\n✅ **STATUS: CHECKED & CLEARED**",
-            reply_markup=None
-        )
-        await callback.answer("Submission cleared!")
-    except Exception as e:
-        logger.error(f"Error clearing submission: {e}")
 
 # ==========================================
 # MAIN EXECUTION
