@@ -66,7 +66,6 @@ async def is_admin_user(user_id: int) -> bool:
 # FAKE DATA & LOGIC
 # ==========================================
 
-# Names are now fully mixed naturally for a professional look across all months.
 FAKE_NAMES: List[str] = [
     "Rohit Verma", "Tariq Anwar", "Mohit Sharma", "Zeeshan Ali", "Shyam Tiwari", 
     "Faisal Shaikh", "Ankit Gupta", "Rizwan Ahmed", "Vikas Singh", "Adil Siddiqui", 
@@ -88,7 +87,6 @@ FAKE_NAMES: List[str] = [
     "Shikha Rastogi", "Megha Srivastav", "Nikita Tandon", "Swati Varshney", "Ritu Yadav"
 ]
 
-# Total 90 names divided optimally, with exactly 12 in September
 FAKE_MEMBERS_BY_MONTH = {
     "April 2026": FAKE_NAMES[0:20],       
     "May 2026": FAKE_NAMES[20:40],        
@@ -101,16 +99,14 @@ async def get_daily_withdrawals() -> Tuple[List[Dict[str, Any]], int, int]:
     today = datetime.now().date()
     random.seed(today.toordinal())
     
-    # Isolate strictly fake names to exclude ANY admin-added user profiles
     real_users_cursor = users_col.find({"is_active": True})
     real_users = await real_users_cursor.to_list(length=1000)
     real_names = {str(u.get("first_name", "")).strip().lower() for u in real_users}
     
     available_names = [n for n in FAKE_NAMES if n.strip().lower() not in real_names]
     if len(available_names) < 20:
-        available_names = FAKE_NAMES  # Safe fallback to prevent crash if real names consume too many
+        available_names = FAKE_NAMES
         
-    # Today's detailed withdrawal list
     num_today = random.randint(15, 20)
     selected_today = random.sample(available_names, num_today)
     
@@ -128,7 +124,6 @@ async def get_daily_withdrawals() -> Tuple[List[Dict[str, Any]], int, int]:
     
     withdrawals_today.sort(key=lambda x: x["time"])
     
-    # Calculate Last 7 Days Total Fake Value (Dynamic target: ~1 Lakh+)
     total_7days = 0
     for i in range(1, 8):
         past_date = today - timedelta(days=i)
@@ -139,7 +134,7 @@ async def get_daily_withdrawals() -> Tuple[List[Dict[str, Any]], int, int]:
             total_7days += random.randint(3, 10) * 1000
             
     total_7days += total_today
-    random.seed()  # Reset global random seed
+    random.seed()
     
     return withdrawals_today, total_today, total_7days
 
@@ -222,7 +217,10 @@ class AdminStates(StatesGroup):
     waiting_for_deny_reason = State()
     waiting_for_add_balance_amount = State()
     waiting_for_remove_balance_amount = State()
+    waiting_for_update_balance_amount = State()
     waiting_for_add_admin = State()
+    waiting_for_single_msg = State()
+    waiting_for_broadcast_msg = State()
 
 # ==========================================
 # KEYBOARDS
@@ -239,23 +237,21 @@ def get_main_menu_keyboard(work_link: str, proof_link: str, is_admin: bool = Fal
 
     kb = [
         [
-            InlineKeyboardButton(text="💸 Approved Withdrawals", callback_data="withdrawal_list")
+            InlineKeyboardButton(text="Active members", callback_data="active_members"),
+            InlineKeyboardButton(text="Payout list", callback_data="withdrawal_list")
         ],
         [
-            InlineKeyboardButton(text="💳 Request Withdrawal", callback_data="request_withdraw")
+            InlineKeyboardButton(text="Request withdrawal", callback_data="request_withdraw"),
+            InlineKeyboardButton(text="My wallet", callback_data="my_balance")
         ],
         [
-            InlineKeyboardButton(text="👥 Active Members", callback_data="active_members"),
-            InlineKeyboardButton(text="💰 My Balance", callback_data="my_balance")
+            InlineKeyboardButton(text="Apply to work", url=sanitize_url(work_link))
         ],
         [
-            InlineKeyboardButton(text="📝 Submit Work", callback_data="submit_work")
+            InlineKeyboardButton(text="Payment screenshots proof", url=sanitize_url(proof_link))
         ],
         [
-            InlineKeyboardButton(text="🟢 Apply to Work", url=sanitize_url(work_link))
-        ],
-        [
-            InlineKeyboardButton(text="🧾 Payment Screenshot Proof", url=sanitize_url(proof_link))
+            InlineKeyboardButton(text="Submit work", callback_data="submit_work")
         ]
     ]
     
@@ -276,11 +272,14 @@ def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📝 Pending Submissions", callback_data="admin_pending_subs")
             ],
             [
-                InlineKeyboardButton(text="👥 Currently Users", callback_data="admin_currently_users"),
-                InlineKeyboardButton(text="👑 Manage Admins", callback_data="admin_manage_admins")
+                InlineKeyboardButton(text="👥 Active Users", callback_data="admin_currently_users"),
+                InlineKeyboardButton(text="📢 Broadcast", callback_data="admin_broadcast_menu")
             ],
             [
-                InlineKeyboardButton(text="🔗 Set Work Link", callback_data="admin_set_work"),
+                InlineKeyboardButton(text="👑 Manage Admins", callback_data="admin_manage_admins"),
+                InlineKeyboardButton(text="🔗 Set Work Link", callback_data="admin_set_work")
+            ],
+            [
                 InlineKeyboardButton(text="🔗 Set Proof Link", callback_data="admin_set_proof")
             ],
             [
@@ -344,7 +343,7 @@ async def show_withdrawal_list(callback: CallbackQuery) -> None:
             text += f"✅ **{w['name']}** - ₹{w['amount']:,} at {w['time']}\n"
             
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="back_to_menu")]]
+            inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]]
         ))
     except Exception as e:
         logger.error(f"Error in withdrawal_list: {e}")
@@ -370,7 +369,7 @@ async def show_active_members(callback: CallbackQuery) -> None:
                 text += ", ".join(names) + "\n\n"
                 
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="back_to_menu")]]
+            inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]]
         ))
     except Exception as e:
         logger.error(f"Error in active_members: {e}")
@@ -386,7 +385,7 @@ async def show_balance(callback: CallbackQuery) -> None:
             f"💵 Current Balance: ₹{balance:,}"
         )
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="back_to_menu")]]
+            inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]]
         ))
     except Exception as e:
         logger.error(f"Error in my_balance: {e}")
@@ -407,7 +406,7 @@ async def request_withdrawal(callback: CallbackQuery) -> None:
                 InlineKeyboardButton(text="🏦 UPI", callback_data="withdraw_method_upi"),
                 InlineKeyboardButton(text="🪙 Crypto", callback_data="withdraw_method_crypto")
             ],
-            [InlineKeyboardButton(text="🔙 Back", callback_data="back_to_menu")]
+            [InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]
         ])
         await callback.message.edit_text(text, reply_markup=kb)
     except Exception as e:
@@ -427,14 +426,22 @@ async def handle_withdraw_method(callback: CallbackQuery) -> None:
             approval_date = user.get("join_date")
             
         delta = datetime.now() - approval_date
+        total_seconds = (timedelta(days=3) - delta).total_seconds()
         
-        if delta.days < 3:
-            await callback.answer(f"⏳ You need to wait 3 days after joining to withdraw.\n\nYour account has been active for {delta.days} day(s).", show_alert=True)
+        if total_seconds > 0:
+            days_left = int(total_seconds // 86400)
+            hours_left = int((total_seconds % 86400) // 3600)
+            if days_left > 0:
+                time_str = f"{days_left} Days left"
+            else:
+                time_str = f"{hours_left} Hours left"
+                
+            await callback.answer(f"⏳ You need to wait 3 days after joining to withdraw.\n\nTime remaining: {time_str}", show_alert=True)
             return
             
         balance = user.get("balance", 0)
         if balance < 3000:
-            await callback.answer(f"❌ Minimum withdrawal is ₹3000.\n\nYour current balance is ₹{balance}.", show_alert=True)
+            await callback.answer(f"Minimum withdrawal is ₹3000, you have only ₹{balance}", show_alert=True)
             return
             
         method = callback.data.split("_")[-1].upper()
@@ -458,7 +465,7 @@ async def submit_work_start(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(WorkSubmission.waiting_for_link1)
         
         cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Cancel Submission", callback_data="back_to_menu")]
+            [InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]
         ])
         
         await callback.message.edit_text(
@@ -582,7 +589,7 @@ async def admin_show_stats(callback: CallbackQuery) -> None:
             f"📥 **Total Submissions:** {total_subs}\n"
             f"⏳ **Pending Submissions:** {pending_subs}"
         )
-        await callback.message.edit_text(text, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]]), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in admin_stats: {e}")
 
@@ -590,7 +597,7 @@ async def admin_show_stats(callback: CallbackQuery) -> None:
 async def admin_add_user_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         await state.set_state(AdminStates.waiting_for_add_user)
-        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel")]])
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
         text = (
             "➕ **Add / Approve User**\n\n"
             "Send the user's details to activate their account.\n"
@@ -658,7 +665,7 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
 async def admin_check_user_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         await state.set_state(AdminStates.waiting_for_user_query)
-        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel")]])
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
         await callback.message.edit_text("🔍 **Check User**\n\nPlease send the User ID, @username, or First Name of the user:", reply_markup=cancel_kb, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in admin_check_user_prompt: {e}")
@@ -712,7 +719,7 @@ async def admin_check_user_result(message: Message, state: FSMContext) -> None:
 async def admin_manage_admins_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         await state.set_state(AdminStates.waiting_for_add_admin)
-        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel")]])
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
         text = (
             "👑 **Manage Admins**\n\n"
             "Please send the **Telegram User ID** of the person you want to make an Admin:\n\n"
@@ -741,7 +748,7 @@ async def admin_manage_admins_save(message: Message, state: FSMContext) -> None:
         await message.reply("⚠️ Error adding admin. Check logs.", reply_markup=get_admin_panel_keyboard())
         await state.clear()
 
-# --- CURRENTLY USERS LOGIC ---
+# --- CURRENTLY USERS LOGIC (Active Users) ---
 
 @router.callback_query(F.data == "admin_currently_users")
 async def admin_currently_users(callback: CallbackQuery) -> None:
@@ -759,7 +766,7 @@ async def admin_currently_users(callback: CallbackQuery) -> None:
             uid = u.get("user_id")
             kb.button(text=f"👤 {name}", callback_data=f"manage_user_{uid}")
         
-        kb.button(text="🔙 Back", callback_data="admin_cancel")
+        kb.button(text="« Back", callback_data="admin_cancel")
         kb.adjust(2)
         
         total_added = len(real_users)
@@ -792,28 +799,42 @@ async def admin_manage_specific_user(callback: CallbackQuery) -> None:
                 InlineKeyboardButton(text="➕ Add Balance", callback_data=f"addbal_{uid}"),
                 InlineKeyboardButton(text="➖ Remove Balance", callback_data=f"rembal_{uid}")
             ],
-            [InlineKeyboardButton(text="🔙 Back to Users List", callback_data="admin_currently_users")]
+            [
+                InlineKeyboardButton(text="🔄 Update Balance", callback_data=f"updbal_{uid}"),
+                InlineKeyboardButton(text="✉️ Send Message", callback_data=f"msguser_{uid}")
+            ],
+            [InlineKeyboardButton(text="« Back", callback_data="admin_currently_users")]
         ])
         
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in manage_user: {e}")
 
+# --- BALANCE MANAGEMENT LOGIC ---
+
 @router.callback_query(F.data.startswith("addbal_"))
 async def prompt_add_bal(callback: CallbackQuery, state: FSMContext) -> None:
     uid = int(callback.data.split("_")[-1])
     await state.set_state(AdminStates.waiting_for_add_balance_amount)
     await state.update_data(target_user_id=uid)
-    await callback.message.reply("👉 Enter the numerical amount to ADD to this user's balance:")
-    await callback.answer()
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"manage_user_{uid}")]])
+    await callback.message.edit_text("👉 Enter the numerical amount to ADD to this user's balance:", reply_markup=kb)
 
 @router.callback_query(F.data.startswith("rembal_"))
 async def prompt_rem_bal(callback: CallbackQuery, state: FSMContext) -> None:
     uid = int(callback.data.split("_")[-1])
     await state.set_state(AdminStates.waiting_for_remove_balance_amount)
     await state.update_data(target_user_id=uid)
-    await callback.message.reply("👉 Enter the numerical amount to REMOVE from this user's balance:")
-    await callback.answer()
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"manage_user_{uid}")]])
+    await callback.message.edit_text("👉 Enter the numerical amount to REMOVE from this user's balance:", reply_markup=kb)
+
+@router.callback_query(F.data.startswith("updbal_"))
+async def prompt_upd_bal(callback: CallbackQuery, state: FSMContext) -> None:
+    uid = int(callback.data.split("_")[-1])
+    await state.set_state(AdminStates.waiting_for_update_balance_amount)
+    await state.update_data(target_user_id=uid)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"manage_user_{uid}")]])
+    await callback.message.edit_text("👉 Enter the NEW exact balance amount to OVERRIDE for this user:", reply_markup=kb)
 
 @router.message(AdminStates.waiting_for_add_balance_amount)
 async def execute_add_bal(message: Message, state: FSMContext, bot: Bot) -> None:
@@ -825,7 +846,6 @@ async def execute_add_bal(message: Message, state: FSMContext, bot: Bot) -> None
         await users_col.update_one({"user_id": uid}, {"$inc": {"balance": amount}})
         await message.reply(f"✅ ₹{amount} added to user `{uid}`.", reply_markup=get_admin_panel_keyboard())
         
-        # User Notification
         if uid:
             try:
                 await bot.send_message(uid, f"🔔 **Balance Update!**\n\n✅ ₹{amount} has been added to your wallet by the Admin.")
@@ -846,7 +866,6 @@ async def execute_rem_bal(message: Message, state: FSMContext, bot: Bot) -> None
         await users_col.update_one({"user_id": uid}, {"$inc": {"balance": -amount}})
         await message.reply(f"✅ ₹{amount} removed from user `{uid}`.", reply_markup=get_admin_panel_keyboard())
         
-        # User Notification
         if uid:
             try:
                 await bot.send_message(uid, f"🔔 **Balance Update!**\n\n⚠️ ₹{amount} has been deducted from your wallet by the Admin.")
@@ -856,6 +875,180 @@ async def execute_rem_bal(message: Message, state: FSMContext, bot: Bot) -> None
         await state.clear()
     except ValueError:
         await message.reply("⚠️ Invalid format. Please send numbers only.")
+
+@router.message(AdminStates.waiting_for_update_balance_amount)
+async def execute_upd_bal(message: Message, state: FSMContext, bot: Bot) -> None:
+    try:
+        amount = int(message.text.strip())
+        data = await state.get_data()
+        uid = data.get("target_user_id")
+        
+        await users_col.update_one({"user_id": uid}, {"$set": {"balance": amount}})
+        await message.reply(f"✅ Balance of user `{uid}` updated successfully to ₹{amount}.", reply_markup=get_admin_panel_keyboard())
+        
+        if uid:
+            try:
+                await bot.send_message(uid, f"🔔 **Balance Update!**\n\n✅ Your balance has been updated to ₹{amount} by the Admin.")
+            except Exception as e:
+                logger.error(f"Could not notify user {uid}: {e}")
+                
+        await state.clear()
+    except ValueError:
+        await message.reply("⚠️ Invalid format. Please send numbers only.")
+
+# --- SINGLE USER BROADCAST LOGIC ---
+
+@router.callback_query(F.data.startswith("msguser_"))
+async def prompt_msg_user(callback: CallbackQuery, state: FSMContext) -> None:
+    uid = int(callback.data.split("_")[-1])
+    await state.set_state(AdminStates.waiting_for_single_msg)
+    await state.update_data(target_user_id=uid)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"manage_user_{uid}")]])
+    await callback.message.edit_text("👉 Send the message you want to send to this specific user (Text, Photo, Video, etc.):", reply_markup=kb)
+
+@router.message(AdminStates.waiting_for_single_msg)
+async def execute_msg_user(message: Message, state: FSMContext, bot: Bot) -> None:
+    try:
+        data = await state.get_data()
+        uid = data.get("target_user_id")
+        
+        await bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=message.message_id)
+        await message.reply(f"✅ Message sent successfully to User ID `{uid}`!", reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Error sending message to user: {e}")
+        await message.reply("⚠️ Failed to send message. User might have blocked the bot.", reply_markup=get_admin_panel_keyboard())
+        await state.clear()
+
+# --- MULTI-SELECT BROADCAST LOGIC ---
+
+async def get_broadcast_ui(page: int, selected_ids: list) -> InlineKeyboardMarkup:
+    users = await users_col.find().sort("join_date", -1).skip(page*40).limit(40).to_list(40)
+    total_users = await users_col.count_documents({})
+    kb = InlineKeyboardBuilder()
+    now = datetime.now()
+    
+    for u in users:
+        uid = u["user_id"]
+        name = u.get("first_name", "User")
+        join_date = u.get("join_date", now)
+        days_ago = (now - join_date).days
+        day_str = f"{days_ago} Days ago" if days_ago > 0 else "Today"
+        
+        prefix = "✅" if uid in selected_ids else "📝"
+        btn_text = f"{prefix} {name} - {day_str}"
+        kb.button(text=btn_text, callback_data=f"bcast_tgl_{uid}_{page}")
+        
+    kb.adjust(1)
+    
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"bcast_page_{page-1}"))
+    if (page + 1) * 40 < total_users:
+        nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"bcast_page_{page+1}"))
+    if nav_row:
+        kb.row(*nav_row)
+        
+    kb.row(
+        InlineKeyboardButton(text="📤 Send Broadcast", callback_data="bcast_send_selected"),
+        InlineKeyboardButton(text="🌍 Broadcast to ALL", callback_data="bcast_send_all")
+    )
+    kb.row(InlineKeyboardButton(text="« Back", callback_data="open_admin_panel"))
+    
+    return kb.as_markup()
+
+@router.callback_query(F.data == "admin_broadcast_menu")
+async def bcast_menu_start(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await state.update_data(bcast_selected_ids=[])
+        kb = await get_broadcast_ui(0, [])
+        await callback.message.edit_text("📢 **Broadcast Menu**\n\nSelect users to send a message to, or broadcast to everyone:", reply_markup=kb, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error starting broadcast menu: {e}")
+
+@router.callback_query(F.data.startswith("bcast_page_"))
+async def bcast_page_change(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        page = int(callback.data.split("_")[-1])
+        data = await state.get_data()
+        selected = data.get("bcast_selected_ids", [])
+        kb = await get_broadcast_ui(page, selected)
+        await callback.message.edit_reply_markup(reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Error changing broadcast page: {e}")
+
+@router.callback_query(F.data.startswith("bcast_tgl_"))
+async def bcast_toggle_user(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        parts = callback.data.split("_")
+        uid = int(parts[2])
+        page = int(parts[3])
+        
+        data = await state.get_data()
+        selected = data.get("bcast_selected_ids", [])
+        
+        if uid in selected:
+            selected.remove(uid)
+        else:
+            selected.append(uid)
+            
+        await state.update_data(bcast_selected_ids=selected)
+        kb = await get_broadcast_ui(page, selected)
+        await callback.message.edit_reply_markup(reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Error toggling broadcast user: {e}")
+
+@router.callback_query(F.data.in_(["bcast_send_selected", "bcast_send_all"]))
+async def bcast_prepare_send(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        mode = "all" if callback.data == "bcast_send_all" else "selected"
+        data = await state.get_data()
+        selected = data.get("bcast_selected_ids", [])
+        
+        if mode == "selected" and not selected:
+            await callback.answer("⚠️ Please select at least one user first!", show_alert=True)
+            return
+            
+        await state.set_state(AdminStates.waiting_for_broadcast_msg)
+        await state.update_data(bcast_mode=mode)
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_broadcast_menu")]])
+        text = f"👉 Send the message you want to broadcast to **{mode.upper()}** users:\n\n*(You can send text, photo, video, etc.)*"
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error preparing broadcast message: {e}")
+
+@router.message(AdminStates.waiting_for_broadcast_msg)
+async def execute_bcast_msg(message: Message, state: FSMContext, bot: Bot) -> None:
+    try:
+        data = await state.get_data()
+        mode = data.get("bcast_mode")
+        selected = data.get("bcast_selected_ids", [])
+        
+        targets = []
+        if mode == "all":
+            users = await users_col.find().to_list(None)
+            targets = [u["user_id"] for u in users]
+        else:
+            targets = selected
+            
+        processing_msg = await message.reply(f"⏳ Broadcasting to {len(targets)} users...")
+        sent_count = 0
+        
+        for uid in targets:
+            try:
+                await bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=message.message_id)
+                sent_count += 1
+                await asyncio.sleep(0.05) # Prevent flood wait
+            except Exception:
+                pass
+                
+        await processing_msg.delete()
+        await message.reply(f"✅ Broadcast complete! Successfully sent to {sent_count} users.", reply_markup=get_admin_panel_keyboard())
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Error sending broadcast: {e}")
+        await state.clear()
 
 # --- PENDING SUBMISSIONS LOGIC ---
 
@@ -881,7 +1074,7 @@ async def admin_show_pending_subs(callback: CallbackQuery) -> None:
         for s in grouped_subs:
             kb.button(text=f"📄 {s['user_name']} ({s['count']} pending)", callback_data=f"view_user_subs_{s['_id']}")
         
-        kb.button(text="🔙 Back to Panel", callback_data="admin_cancel")
+        kb.button(text="« Back", callback_data="admin_cancel")
         kb.adjust(1)
         
         await callback.message.edit_text("📋 **Pending Work Submissions:**\nClick on a user to view their grouped submissions:", reply_markup=kb.as_markup(), parse_mode="Markdown")
@@ -914,7 +1107,8 @@ async def admin_view_user_subs(callback: CallbackQuery, bot: Bot) -> None:
             [
                 InlineKeyboardButton(text="✅ Accept", callback_data=f"accept_sub_{sub_id}"),
                 InlineKeyboardButton(text="❌ Deny", callback_data=f"deny_sub_{sub_id}")
-            ]
+            ],
+            [InlineKeyboardButton(text="« Back", callback_data="admin_pending_subs")]
         ])
         
         photo_id = sub.get("photo_id")
@@ -993,7 +1187,6 @@ async def process_submission_balance(message: Message, state: FSMContext, bot: B
             )
             await message.reply(f"✅ Successfully added ₹{amount} to User `{target_id}`'s balance.", parse_mode="Markdown")
             
-            # User Notification
             try:
                 await bot.send_message(target_id, f"🎉 **Work Accepted!**\n\nYour recent work submission was approved.\n💰 **Balance Added:** ₹{amount}")
             except Exception as e:
@@ -1053,7 +1246,6 @@ async def process_deny_reason(message: Message, state: FSMContext, bot: Bot) -> 
         
         await message.reply(f"✅ Submission marked as DENIED for User `{target_id}`.", parse_mode="Markdown")
         
-        # User Notification
         if target_id:
             try:
                 await bot.send_message(target_id, f"❌ **Work Denied!**\n\nYour recent work submission was declined.\n📝 **Reason:** {reason}")
@@ -1071,7 +1263,7 @@ async def process_deny_reason(message: Message, state: FSMContext, bot: Bot) -> 
 async def admin_set_work_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         await state.set_state(AdminStates.waiting_for_work_link)
-        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel")]])
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
         await callback.message.edit_text("🔗 **Set Work Link**\n\nPlease send the new URL for the 'Apply to Work' button:", reply_markup=cancel_kb, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in admin_set_work_prompt: {e}")
@@ -1094,7 +1286,7 @@ async def admin_set_work_save(message: Message, state: FSMContext) -> None:
 async def admin_set_proof_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         await state.set_state(AdminStates.waiting_for_proof_link)
-        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel")]])
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
         await callback.message.edit_text("🔗 **Set Proof Link**\n\nPlease send the new URL for the 'Payment Screenshot Proof' button:", reply_markup=cancel_kb, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in admin_set_proof_prompt: {e}")
@@ -1208,7 +1400,6 @@ async def admin_add_balance(message: Message, bot: Bot) -> None:
         
         if result.modified_count > 0:
             await message.reply(f"✅ Successfully added ₹{amount} to User `{target_id}`'s balance. (Manual Update)", parse_mode="Markdown")
-            # User Notification
             try:
                 await bot.send_message(target_id, f"🔔 **Balance Update!**\n\n✅ ₹{amount} has been added to your wallet by the Admin.")
             except Exception:
