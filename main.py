@@ -48,38 +48,37 @@ settings_col: AgnosticCollection = db["settings"]
 router = Router()
 
 # ==========================================
-# FAKE DATA & LOGIC (Untouched as requested)
+# FAKE DATA & LOGIC
 # ==========================================
 
 FAKE_NAMES: List[str] = [
-    "Aarav Patel", "Mohammed Ali", "Vivaan Sharma", "Tariq Khan", "Aditya Singh",
-    "Imran Sheikh", "Vihaan Kumar", "Zayn Malik", "Arjun Gupta", "Rehan Ansari",
-    "Sai Joshi", "Yusuf Pathan", "Ayaan Desai", "Omar Farooq", "Krishna Reddy",
-    "Bilal Ahmed", "Ishaan Verma", "Hamza Qureshi", "Shaurya Chauhan", "Aamir Khan",
-    "Rishabh Jain", "Hassan Raza", "Kabir Das", "Zaid Syed", "Atharva Kadam",
-    "Faisal Khatri", "Dhruv Menon", "Arif Hussain", "Ananya Mehra", "Fatima Bibi",
-    "Riya Rajput", "Zoya Sheikh", "Aadhya Mishra", "Sana Khan", "Diya Nair",
-    "Aisha Ansari", "Ishita Agarwal", "Zara Ali", "Kavya Pillai", "Maryam Siddiqui",
-    "Anushka Thakur", "Alia Bhatt", "Avni Kapoor", "Mehak Mirza", "Prisha Tiwari",
-    "Iqra Qazi", "Sneha Roy", "Sara Rahman", "Nandini Yadav", "Rida Hashmi",
-    "Karan Malhotra", "Ravi Teja", "Sameer Verma", "Junaid Akhtar", "Deepak Chahar",
-    "Sahil Baig", "Rohan Joshi", "Nadeem Saifi", "Prakash Jha", "Rizwan Beg",
-    "Amitabh Bachchan", "Shoaib Malik", "Sanjay Dutt", "Usman Khawaja", "Rajesh Khanna",
-    "Asad Owaisi", "Sunil Shetty", "Mustafa Zahid", "Vikram Rathore", "Tahir Raj",
-    "Rahul Dravid", "Nawazuddin Siddiqui", "Anil Kapoor", "Salman Khan", "Gaurav Taneja",
-    "Irfan Pathan", "Mohit Suri", "Zaheer Khan", "Harshvardhan Rane", "Danish Sait",
-    "Neha Kakkar", "Farah Khan", "Pooja Hegde", "Suhana Khan", "Kriti Sanon",
-    "Huma Qureshi", "Shraddha Kapoor", "Gauahar Khan", "Disha Patani", "Nushrratt Bharuccha",
-    "Kiara Advani", "Tabu", "Alaya F", "Zareen Khan", "Mrunal Thakur",
-    "Fatima Sana Shaikh", "Bhumi Pednekar", "Hina Khan", "Yami Gautam", "Sanjeeda Sheikh"
+    "Rohit Verma", "Mohit Sharma", "Shyam Tiwari", "Ankit Gupta", "Vikas Singh", 
+    "Saurabh Mishra", "Gaurav Jain", "Neeraj Yadav", "Manish Patel", "Suresh Kumar", 
+    "Ramesh Rajput", "Dinesh Saini", "Pankaj Joshi", "Pradeep Meena", "Manoj Agarwal", 
+    "Nitin Bhatia", "Naveen Chawla", "Praveen Dixit", "Ashish Garg", "Vishal Jha", 
+    "Sumit Khandelwal", "Alok Pandey", "Yogesh Rathi", "Lokesh Thakur", "Sandeep Bansal", 
+    "Kuldeep Chauhan", "Mandeep Dalal", "Hemant Goswami", "Ravi Khatri", "Tarun Lamba", 
+    "Vinit Mathur", "Harish Saxena", "Girish Ojha", "Kailash Parashar", "Prakash Rathore", 
+    "Omkar Dubey", "Shivam Tomar", "Satish Upadhyay", "Dhruv Vyas", "Kamlesh Wadhwa", 
+    "Brijesh Yadav", "Jatin Arora", "Gagan Bhardwaj", "Aman Chaturvedi", "Akash Kaushik", 
+    "Sagar Gautam", "Suraj Hooda", "Akhil Jaiswal", "Rajat Madaan", "Rupesh Lohar", 
+    "Ram Makwana", "Mayank Negi", "Dheeraj Pal", "Chirag Rawat", "Piyush Sonkar", 
+    "Tushar Tyagi", "Naman Upreti", "Chetan Vashisht", "Lakshay Wadhawan", "Bhuvan Yagnik", 
+    "Payal Soni", "Ankita Mahajan", "Jagriti Pathak", "Shikha Rastogi", "Megha Srivastav", 
+    "Nikita Tandon", "Swati Varshney", "Ritu Yadav", "Tariq Anwar", "Zeeshan Ali", 
+    "Faisal Shaikh", "Rizwan Ahmed", "Adil Siddiqui", "Asif Ansari", "Kashif Baig", 
+    "Noman Mirza", "Rehan Qureshi", "Samir Malik", "Usman Sayyed", "Bilal Hashmi", 
+    "Haris Farooqui", "Junaid Mansuri", "Yaseen Pathan", "Danish Raza", "Shoaib Usmani", 
+    "Nadeem Shah", "Altaf Hussain", "Majid Inamdar", "Sadiya Bano", "Zainab Khatoon"
 ]
 
+# Total 90 names divided optimally, with exactly 12 in September
 FAKE_MEMBERS_BY_MONTH = {
-    "April 2026": FAKE_NAMES[0:25],       
-    "May 2026": FAKE_NAMES[25:47],        
-    "June 2026": FAKE_NAMES[47:68],       
-    "July 2026": FAKE_NAMES[68:89],       
-    "September 2026": FAKE_NAMES[89:100]  
+    "April 2026": FAKE_NAMES[0:20],       
+    "May 2026": FAKE_NAMES[20:40],        
+    "June 2026": FAKE_NAMES[40:59],       
+    "July 2026": FAKE_NAMES[59:78],       
+    "September 2026": FAKE_NAMES[78:90]  
 }
 
 def get_daily_withdrawals() -> Tuple[List[Dict[str, Any]], int]:
@@ -120,18 +119,40 @@ async def get_user(user_id: int) -> Dict[str, Any]:
 
 async def register_user_if_not_exists(user_id: int, username: str, first_name: str) -> None:
     try:
-        existing_user = await users_col.find_one({"user_id": user_id})
-        if not existing_user:
-            await users_col.insert_one({
-                "user_id": user_id,
-                "username": username,
-                "first_name": first_name,
-                "is_active": False,
-                "balance": 0,
-                "submission_count": 0,  # Added to track user usage
-                "join_date": datetime.now(),
-                "approval_date": None
-            })
+        # Check if pre-registered via ID
+        existing_by_id = await users_col.find_one({"user_id": user_id})
+        if existing_by_id:
+            # If user was added by admin using ID, their first_name is stored as their ID temporarily.
+            if existing_by_id.get("first_name") == str(user_id) or not existing_by_id.get("username"):
+                await users_col.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"username": username, "first_name": first_name}}
+                )
+            return
+
+        # Check if pre-registered via Username / Link
+        existing_by_username = None
+        if username:
+            existing_by_username = await users_col.find_one({"username": {"$regex": f"^{username}$", "$options": "i"}})
+        
+        if existing_by_username and existing_by_username.get("user_id") == 0:
+            await users_col.update_one(
+                {"_id": existing_by_username["_id"]},
+                {"$set": {"user_id": user_id, "first_name": first_name}}
+            )
+            return
+
+        # Standard new user registration
+        await users_col.insert_one({
+            "user_id": user_id,
+            "username": username,
+            "first_name": first_name,
+            "is_active": False,
+            "balance": 0,
+            "submission_count": 0,
+            "join_date": datetime.now(),
+            "approval_date": None
+        })
     except Exception as e:
         logger.error(f"Error registering user {user_id}: {e}")
 
@@ -160,43 +181,52 @@ class AdminStates(StatesGroup):
     waiting_for_work_link = State()
     waiting_for_proof_link = State()
     waiting_for_user_query = State()
+    waiting_for_add_user = State()
 
 # ==========================================
 # KEYBOARDS
 # ==========================================
 
-def get_main_menu_keyboard(work_link: str, proof_link: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="💸 Withdrawal Done", callback_data="withdrawal_list"),
-                InlineKeyboardButton(text="👥 Active Members", callback_data="active_members")
-            ],
-            [
-                InlineKeyboardButton(text="🟢 Apply to Work", callback_data="apply_work"),
-                InlineKeyboardButton(text="💰 My Balance", callback_data="my_balance")
-            ],
-            [
-                InlineKeyboardButton(text="💳 Request Withdrawal", callback_data="request_withdraw"),
-                InlineKeyboardButton(text="📝 Submit Work", callback_data="submit_work")
-            ],
-            [
-                InlineKeyboardButton(text="🚀 Start Work Now", url=work_link)
-            ],
-            [
-                InlineKeyboardButton(text="🧾 Payment Screenshot Proof", url=proof_link)
-            ]
+def get_main_menu_keyboard(work_link: str, proof_link: str, is_admin: bool = False) -> InlineKeyboardMarkup:
+    # Perfected UI Layout as requested
+    kb = [
+        [
+            InlineKeyboardButton(text="💸 Approved Withdrawals", callback_data="withdrawal_list")
+        ],
+        [
+            InlineKeyboardButton(text="💳 Request Withdrawal", callback_data="request_withdraw")
+        ],
+        [
+            InlineKeyboardButton(text="👥 Active Members", callback_data="active_members"),
+            InlineKeyboardButton(text="💰 My Balance", callback_data="my_balance")
+        ],
+        [
+            InlineKeyboardButton(text="🟢 Apply to Work", callback_data="apply_work"),
+            InlineKeyboardButton(text="📝 Submit Work", callback_data="submit_work")
+        ],
+        [
+            InlineKeyboardButton(text="🚀 Start Work Now", url=work_link)
+        ],
+        [
+            InlineKeyboardButton(text="🧾 Payment Screenshot Proof", url=proof_link)
         ]
-    )
+    ]
+    
+    # Show Admin Panel button if the user is the Admin
+    if is_admin:
+        kb.append([InlineKeyboardButton(text="👑 Admin Panel", callback_data="open_admin_panel")])
+        
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="📊 Bot Stats", callback_data="admin_stats"),
-                InlineKeyboardButton(text="🔍 Check User", callback_data="admin_check_user")
+                InlineKeyboardButton(text="➕ Add User", callback_data="admin_add_user_panel")
             ],
             [
+                InlineKeyboardButton(text="🔍 Check User", callback_data="admin_check_user"),
                 InlineKeyboardButton(text="📝 Pending Submissions", callback_data="admin_pending_subs")
             ],
             [
@@ -219,22 +249,32 @@ async def start_cmd(message: Message, bot: Bot, state: FSMContext) -> None:
         await state.clear()
         username = message.from_user.username or ""
         first_name = message.from_user.first_name or "User"
+        user_id = message.from_user.id
         
-        # Register user
-        existing_user = await users_col.find_one({"user_id": message.from_user.id})
-        await register_user_if_not_exists(message.from_user.id, username, first_name)
+        # Check existing user logic before registration for notification purpose
+        existing_by_id = await users_col.find_one({"user_id": user_id})
+        is_pre_registered = False
         
-        # Notify admin for new users
-        if not existing_user and ADMIN_ID != 0:
-            notify_text = f"🆕 **New User Started the Bot!**\n\n👤 Name: {first_name}\n🔗 Username: @{username}\n🆔 ID: `{message.from_user.id}`"
+        if not existing_by_id and username:
+            existing_by_user = await users_col.find_one({"username": {"$regex": f"^{username}$", "$options": "i"}})
+            if existing_by_user and existing_by_user.get("user_id") == 0:
+                is_pre_registered = True
+
+        await register_user_if_not_exists(user_id, username, first_name)
+        
+        # Notify admin for completely new users
+        if not existing_by_id and not is_pre_registered and ADMIN_ID != 0:
+            notify_text = f"🆕 **New User Started the Bot!**\n\n👤 Name: {first_name}\n🔗 Username: @{username}\n🆔 ID: `{user_id}`"
             await bot.send_message(ADMIN_ID, notify_text, parse_mode="Markdown")
 
         settings = await get_bot_settings()
+        is_admin = (user_id == ADMIN_ID)
+        
         text = (
             f"Welcome {first_name}!\n\n"
             "Earn money by running Instagram Ads. Choose an option below to get started or manage your work."
         )
-        await message.answer(text, reply_markup=get_main_menu_keyboard(settings["work_link"], settings["proof_link"]))
+        await message.answer(text, reply_markup=get_main_menu_keyboard(settings["work_link"], settings["proof_link"], is_admin))
     except Exception as e:
         logger.error(f"Error in start command: {e}")
 
@@ -260,7 +300,7 @@ async def show_withdrawal_list(callback: CallbackQuery) -> None:
 async def show_active_members(callback: CallbackQuery) -> None:
     try:
         real_users_cursor = users_col.find({"is_active": True})
-        real_users = await real_users_cursor.to_list(length=100)
+        real_users = await real_users_cursor.to_list(length=500)
         
         text = "🌟 **Our Active Working Members** 🌟\n\n"
         
@@ -270,6 +310,7 @@ async def show_active_members(callback: CallbackQuery) -> None:
                 text += f"📅 **{month} (Total: {total_sept} Members)**\n"
                 combined_names = names.copy()
                 for u in real_users:
+                    # Will display pre-registered names cleanly
                     combined_names.append(u.get("first_name", "User"))
                 text += ", ".join(combined_names) + "\n\n"
             else:
@@ -445,11 +486,12 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         await state.clear()
         settings = await get_bot_settings()
+        is_admin = (callback.from_user.id == ADMIN_ID)
         text = (
             f"Welcome {callback.from_user.first_name}!\n\n"
             "Earn money by running Instagram Ads. Choose an option below to get started or manage your work."
         )
-        await callback.message.edit_text(text, reply_markup=get_main_menu_keyboard(settings["work_link"], settings["proof_link"]))
+        await callback.message.edit_text(text, reply_markup=get_main_menu_keyboard(settings["work_link"], settings["proof_link"], is_admin))
     except Exception as e:
         logger.error(f"Error in back_to_menu: {e}")
 
@@ -467,6 +509,18 @@ async def admin_panel_cmd(message: Message, state: FSMContext) -> None:
         await message.reply(text, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in admin command: {e}")
+
+@router.callback_query(F.data == "open_admin_panel")
+async def open_admin_panel_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        if callback.from_user.id != ADMIN_ID:
+            await callback.answer("🚫 Access Denied", show_alert=True)
+            return
+        await state.clear()
+        text = "👑 **Admin Control Panel**\n\nWelcome back, Master. Select an option below to manage the bot:"
+        await callback.message.edit_text(text, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in open_admin_panel: {e}")
 
 @router.callback_query(F.data == "admin_stats")
 async def admin_show_stats(callback: CallbackQuery) -> None:
@@ -487,6 +541,77 @@ async def admin_show_stats(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error(f"Error in admin_stats: {e}")
 
+@router.callback_query(F.data == "admin_add_user_panel")
+async def admin_add_user_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await state.set_state(AdminStates.waiting_for_add_user)
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel")]])
+        text = (
+            "➕ **Add / Approve User**\n\n"
+            "Send the user's details to activate their account.\n"
+            "Supported formats:\n"
+            "• `123456789` (Telegram ID)\n"
+            "• `@username` or `username`\n"
+            "• `https://t.me/username`\n\n"
+            "*Note: If they haven't started the bot yet, they will be pre-approved and instantly show up in Active Members!*"
+        )
+        await callback.message.edit_text(text, reply_markup=cancel_kb, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in admin_add_user_prompt: {e}")
+
+@router.message(AdminStates.waiting_for_add_user)
+async def admin_add_user_save(message: Message, state: FSMContext) -> None:
+    try:
+        query = message.text.strip()
+        
+        # Clean formatting
+        if "t.me/" in query:
+            query = query.split("t.me/")[-1].strip()
+        elif query.startswith("@"):
+            query = query[1:].strip()
+            
+        is_digit = query.lstrip('-').isdigit()
+        
+        user = None
+        if is_digit:
+            user = await users_col.find_one({"user_id": int(query)})
+        else:
+            user = await users_col.find_one({"username": {"$regex": f"^{query}$", "$options": "i"}})
+            
+        if user:
+            # Activate existing user
+            await users_col.update_one(
+                {"_id": user["_id"]}, 
+                {"$set": {"is_active": True, "approval_date": datetime.now()}}
+            )
+            name = user.get("first_name", query)
+            await message.reply(f"✅ User **{name}** is now an ACTIVE member!", reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+        else:
+            # Pre-register user so they immediately show up
+            user_id = int(query) if is_digit else 0
+            username = query if not is_digit else ""
+            name = query
+            
+            await users_col.insert_one({
+                "user_id": user_id,
+                "username": username,
+                "first_name": name,
+                "is_active": True,
+                "approval_date": datetime.now(),
+                "balance": 0,
+                "submission_count": 0,
+                "join_date": datetime.now()
+            })
+            
+            success_msg = f"✅ User `{query}` has been **pre-approved** and added to Active Members!\n(Profile will fully sync when they start the bot)"
+            await message.reply(success_msg, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+            
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Error in admin_add_user_save: {e}")
+        await message.reply("⚠️ Error adding user. Check format.", reply_markup=get_admin_panel_keyboard())
+        await state.clear()
+
 @router.callback_query(F.data == "admin_check_user")
 async def admin_check_user_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     try:
@@ -504,7 +629,7 @@ async def admin_check_user_result(message: Message, state: FSMContext) -> None:
             query = query[1:]
             
         db_query = {}
-        if query.isdigit():
+        if query.lstrip('-').isdigit():
             db_query = {"user_id": int(query)}
         else:
             db_query = {"$or": [
@@ -622,7 +747,7 @@ async def admin_close_panel(callback: CallbackQuery, state: FSMContext) -> None:
         logger.error(f"Error closing admin panel: {e}")
 
 # ==========================================
-# OLD ADMIN COMMANDS (Preserved as requested)
+# OLD ADMIN COMMANDS
 # ==========================================
 
 @router.message(Command("add_user"))
@@ -633,19 +758,18 @@ async def admin_add_user(message: Message) -> None:
             
         args = message.text.split(maxsplit=1)
         if len(args) != 2:
-            await message.reply("Usage: `/add_user <user_id | @username | t.me/link | First Name>`", parse_mode="Markdown")
+            await message.reply("Usage: `/add_user <user_id | @username | t.me/link | First Name>`\n\n*Tip: You can now use the Admin Panel to do this easily!*", parse_mode="Markdown")
             return
             
         query = args[1].strip()
         
-        # Clean query if it's a link or @
         if "t.me/" in query:
             query = query.split("t.me/")[-1]
         elif query.startswith("@"):
             query = query[1:]
             
         db_query = {}
-        if query.isdigit():
+        if query.lstrip('-').isdigit():
             db_query = {"user_id": int(query)}
         else:
             db_query = {"$or": [
@@ -656,7 +780,7 @@ async def admin_add_user(message: Message) -> None:
         users = await users_col.find(db_query).to_list(5)
         
         if not users:
-            await message.reply(f"⚠️ No matching user found for `{query}`. Ask them to start the bot first.", parse_mode="Markdown")
+            await message.reply(f"⚠️ No matching user found for `{query}`. You can add them through the Admin Panel to pre-approve them.", parse_mode="Markdown")
             return
             
         if len(users) > 1:
@@ -757,7 +881,6 @@ async def admin_view_submissions(message: Message) -> None:
             
         kb = InlineKeyboardBuilder()
         for s in subs:
-            # Inline button with User's Name
             kb.button(text=f"📄 {s.get('user_name', 'User')}", callback_data=f"view_sub_{str(s['_id'])}")
         
         kb.adjust(1)
@@ -787,7 +910,6 @@ async def admin_open_submission(callback: CallbackQuery, bot: Bot) -> None:
             [InlineKeyboardButton(text="✅ Mark as Checked (Clear)", callback_data=f"clear_sub_{sub_id}")]
         ])
         
-        # Send Photo with the Link in Caption
         await bot.send_photo(
             chat_id=callback.from_user.id,
             photo=sub.get("photo_id"),
