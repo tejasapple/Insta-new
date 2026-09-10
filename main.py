@@ -11,6 +11,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    LinkPreviewOptions
 )
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.state import State, StatesGroup
@@ -237,21 +238,21 @@ def get_main_menu_keyboard(work_link: str, proof_link: str, is_admin: bool = Fal
 
     kb = [
         [
-            InlineKeyboardButton(text="Active members", callback_data="active_members"),
-            InlineKeyboardButton(text="Payout list", callback_data="withdrawal_list")
+            InlineKeyboardButton(text="👥 Active members", callback_data="active_members"),
+            InlineKeyboardButton(text="📜 Payout list", callback_data="withdrawal_list")
         ],
         [
-            InlineKeyboardButton(text="Request withdrawal", callback_data="request_withdraw"),
-            InlineKeyboardButton(text="My wallet", callback_data="my_balance")
+            InlineKeyboardButton(text="💸 Request withdrawal", callback_data="request_withdraw"),
+            InlineKeyboardButton(text="👛 My wallet", callback_data="my_balance")
         ],
         [
-            InlineKeyboardButton(text="Apply to work", url=sanitize_url(work_link))
+            InlineKeyboardButton(text="💼 Apply to work", url=sanitize_url(work_link))
         ],
         [
-            InlineKeyboardButton(text="Payment screenshots proof", url=sanitize_url(proof_link))
+            InlineKeyboardButton(text="📢 Updates", url=sanitize_url(proof_link))
         ],
         [
-            InlineKeyboardButton(text="Submit work", callback_data="submit_work")
+            InlineKeyboardButton(text="📤 Submit work", callback_data="submit_work")
         ]
     ]
     
@@ -280,7 +281,8 @@ def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🔗 Set Work Link", callback_data="admin_set_work")
             ],
             [
-                InlineKeyboardButton(text="🔗 Set Proof Link", callback_data="admin_set_proof")
+                InlineKeyboardButton(text="🔗 Set Proof Link", callback_data="admin_set_proof"),
+                InlineKeyboardButton(text="🔗 User Work Links", callback_data="admin_work_links")
             ],
             [
                 InlineKeyboardButton(text="❌ Close Panel", callback_data="admin_close")
@@ -321,8 +323,13 @@ async def start_cmd(message: Message, bot: Bot, state: FSMContext) -> None:
         is_admin = await is_admin_user(user_id)
         
         text = (
-            f"Welcome {first_name}!\n\n"
-            "Earn money by running Instagram Ads. Choose an option below to get started or manage your work."
+            f"🏢 **Welcome to the Official Work Portal, {first_name}!** 🌟\n\n"
+            "We provide a premium platform for professionals to monetize their Instagram presence through targeted ad campaigns.\n\n"
+            "📊 **Your Dashboard Overview:**\n"
+            "• Manage your workflow seamlessly.\n"
+            "• Track your daily earnings & payouts.\n"
+            "• Submit your completed tasks for rapid approval.\n\n"
+            "👇 *Please select an option below to navigate your dashboard:*"
         )
         await message.answer(text, reply_markup=get_main_menu_keyboard(settings["work_link"], settings["proof_link"], is_admin))
     except Exception as e:
@@ -540,8 +547,13 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
         settings = await get_bot_settings()
         is_admin = await is_admin_user(callback.from_user.id)
         text = (
-            f"Welcome {callback.from_user.first_name}!\n\n"
-            "Earn money by running Instagram Ads. Choose an option below to get started or manage your work."
+            f"🏢 **Welcome to the Official Work Portal, {callback.from_user.first_name}!** 🌟\n\n"
+            "We provide a premium platform for professionals to monetize their Instagram presence through targeted ad campaigns.\n\n"
+            "📊 **Your Dashboard Overview:**\n"
+            "• Manage your workflow seamlessly.\n"
+            "• Track your daily earnings & payouts.\n"
+            "• Submit your completed tasks for rapid approval.\n\n"
+            "👇 *Please select an option below to navigate your dashboard:*"
         )
         await callback.message.edit_text(text, reply_markup=get_main_menu_keyboard(settings["work_link"], settings["proof_link"], is_admin))
     except Exception as e:
@@ -1050,6 +1062,41 @@ async def execute_bcast_msg(message: Message, state: FSMContext, bot: Bot) -> No
         logger.error(f"Error sending broadcast: {e}")
         await state.clear()
 
+# --- LINKS SECTION LOGIC (NEW FEATURE) ---
+
+@router.callback_query(F.data == "admin_work_links")
+async def admin_all_work_links(callback: CallbackQuery) -> None:
+    try:
+        # Sort by timestamp -1 (descending) so newest is always on top
+        subs = await submissions_col.find({"status": "pending"}).sort("timestamp", -1).to_list(length=40)
+        
+        if not subs:
+            await callback.answer("✅ No pending links found.", show_alert=True)
+            return
+            
+        text = "🔗 **Recent User Work Links (Newest First)**\n\n"
+        for idx, s in enumerate(subs, 1):
+            name = s.get('user_name', 'Unknown')
+            l1 = s.get('link1', 'N/A')
+            l2 = s.get('link2', 'N/A')
+            text += f"👤 **{name}**\n├ 🔗 {l1}\n└ 🔗 {l2}\n\n"
+            
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]])
+        
+        # Safe method to disable link previews depending on aiogram version parameters
+        try:
+            await callback.message.edit_text(
+                text, 
+                reply_markup=kb, 
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
+        except Exception:
+            # Fallback for alternative aiogram configurations
+            await callback.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+            
+    except Exception as e:
+        logger.error(f"Error in admin_work_links: {e}")
+
 # --- PENDING SUBMISSIONS LOGIC ---
 
 @router.callback_query(F.data == "admin_pending_subs")
@@ -1057,11 +1104,14 @@ async def admin_show_pending_subs(callback: CallbackQuery) -> None:
     try:
         pipeline = [
             {"$match": {"status": "pending"}},
+            {"$sort": {"timestamp": -1}},  # Sorting nested tasks newest first
             {"$group": {
                 "_id": "$user_id",
                 "user_name": {"$first": "$user_name"},
-                "count": {"$sum": 1}
-            }}
+                "count": {"$sum": 1},
+                "latest": {"$first": "$timestamp"}
+            }},
+            {"$sort": {"latest": -1}}  # Sorting groups newest first
         ]
         subs_cursor = submissions_col.aggregate(pipeline)
         grouped_subs = await subs_cursor.to_list(length=50)
@@ -1077,7 +1127,7 @@ async def admin_show_pending_subs(callback: CallbackQuery) -> None:
         kb.button(text="« Back", callback_data="admin_cancel")
         kb.adjust(1)
         
-        await callback.message.edit_text("📋 **Pending Work Submissions:**\nClick on a user to view their grouped submissions:", reply_markup=kb.as_markup(), parse_mode="Markdown")
+        await callback.message.edit_text("📋 **Pending Work Submissions:**\nClick on a user to view their grouped submissions (Newest Submissions on top):", reply_markup=kb.as_markup(), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in admin_pending_subs: {e}")
 
@@ -1085,7 +1135,8 @@ async def admin_show_pending_subs(callback: CallbackQuery) -> None:
 async def admin_view_user_subs(callback: CallbackQuery, bot: Bot) -> None:
     try:
         user_id = int(callback.data.split("_")[-1])
-        sub = await submissions_col.find_one({"user_id": user_id, "status": "pending"}, sort=[("timestamp", 1)])
+        # Changed sort to -1 so newest submission comes up first for review
+        sub = await submissions_col.find_one({"user_id": user_id, "status": "pending"}, sort=[("timestamp", -1)])
         if not sub:
             await callback.answer("⚠️ No more pending submissions for this user.", show_alert=True)
             return
@@ -1287,7 +1338,7 @@ async def admin_set_proof_prompt(callback: CallbackQuery, state: FSMContext) -> 
     try:
         await state.set_state(AdminStates.waiting_for_proof_link)
         cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
-        await callback.message.edit_text("🔗 **Set Proof Link**\n\nPlease send the new URL for the 'Payment Screenshot Proof' button:", reply_markup=cancel_kb, parse_mode="Markdown")
+        await callback.message.edit_text("🔗 **Set Proof Link**\n\nPlease send the new URL for the 'Updates' button:", reply_markup=cancel_kb, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in admin_set_proof_prompt: {e}")
 
@@ -1300,7 +1351,7 @@ async def admin_set_proof_save(message: Message, state: FSMContext) -> None:
             {"$set": {"proof_link": new_link}},
             upsert=True
         )
-        await message.reply(f"✅ 'Payment Screenshot Proof' button link updated successfully!\n\nNew Link: {new_link}", reply_markup=get_admin_panel_keyboard())
+        await message.reply(f"✅ 'Updates' button link updated successfully!\n\nNew Link: {new_link}", reply_markup=get_admin_panel_keyboard())
         await state.clear()
     except Exception as e:
         logger.error(f"Error saving proof link: {e}")
@@ -1444,7 +1495,7 @@ async def admin_set_proof_link(message: Message) -> None:
             {"$set": {"proof_link": new_link}},
             upsert=True
         )
-        await message.reply(f"✅ 'Payment Screenshot Proof' button link updated to: {new_link}")
+        await message.reply(f"✅ 'Updates' button link updated to: {new_link}")
     except Exception as e:
         logger.error(f"Error setting proof link: {e}")
 
