@@ -48,6 +48,21 @@ settings_col: AgnosticCollection = db["settings"]
 router = Router()
 
 # ==========================================
+# MULTI-ADMIN CHECK HELPER
+# ==========================================
+
+async def is_admin_user(user_id: int) -> bool:
+    if user_id == ADMIN_ID:
+        return True
+    try:
+        admin_doc = await settings_col.find_one({"_id": "admins"})
+        if admin_doc and user_id in admin_doc.get("admin_list", []):
+            return True
+    except Exception as e:
+        logger.error(f"Error checking admin status: {e}")
+    return False
+
+# ==========================================
 # FAKE DATA & LOGIC
 # ==========================================
 
@@ -204,8 +219,10 @@ class AdminStates(StatesGroup):
     waiting_for_user_query = State()
     waiting_for_add_user = State()
     waiting_for_submission_balance = State()
+    waiting_for_deny_reason = State()
     waiting_for_add_balance_amount = State()
     waiting_for_remove_balance_amount = State()
+    waiting_for_add_admin = State()
 
 # ==========================================
 # KEYBOARDS
@@ -259,7 +276,8 @@ def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📝 Pending Submissions", callback_data="admin_pending_subs")
             ],
             [
-                InlineKeyboardButton(text="👥 Currently Users", callback_data="admin_currently_users")
+                InlineKeyboardButton(text="👥 Currently Users", callback_data="admin_currently_users"),
+                InlineKeyboardButton(text="👑 Manage Admins", callback_data="admin_manage_admins")
             ],
             [
                 InlineKeyboardButton(text="🔗 Set Work Link", callback_data="admin_set_work"),
@@ -295,10 +313,13 @@ async def start_cmd(message: Message, bot: Bot, state: FSMContext) -> None:
         
         if not existing_by_id and not is_pre_registered and ADMIN_ID != 0:
             notify_text = f"🆕 **New User Started the Bot!**\n\n👤 Name: {first_name}\n🔗 Username: @{username}\n🆔 ID: `{user_id}`"
-            await bot.send_message(ADMIN_ID, notify_text, parse_mode="Markdown")
+            try:
+                await bot.send_message(ADMIN_ID, notify_text, parse_mode="Markdown")
+            except Exception:
+                pass
 
         settings = await get_bot_settings()
-        is_admin = (user_id == ADMIN_ID)
+        is_admin = await is_admin_user(user_id)
         
         text = (
             f"Welcome {first_name}!\n\n"
@@ -357,7 +378,7 @@ async def show_active_members(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "my_balance")
 async def show_balance(callback: CallbackQuery) -> None:
     try:
-        user = await get_user(callback.fromuser.id if hasattr(callback, 'from_user') else callback.from_user.id)
+        user = await get_user(callback.from_user.id)
         balance = user.get("balance", 0)
         text = (
             f"💰 **My Wallet Balance**\n\n"
@@ -510,7 +531,7 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         await state.clear()
         settings = await get_bot_settings()
-        is_admin = (callback.from_user.id == ADMIN_ID)
+        is_admin = await is_admin_user(callback.from_user.id)
         text = (
             f"Welcome {callback.from_user.first_name}!\n\n"
             "Earn money by running Instagram Ads. Choose an option below to get started or manage your work."
@@ -520,13 +541,13 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
         logger.error(f"Error in back_to_menu: {e}")
 
 # ==========================================
-# ADMIN PANEL (NEW FULL CONTROL LOGIC)
+# ADMIN PANEL (FULL CONTROL LOGIC)
 # ==========================================
 
 @router.message(Command("admin"))
 async def admin_panel_cmd(message: Message, state: FSMContext) -> None:
     try:
-        if message.from_user.id != ADMIN_ID:
+        if not await is_admin_user(message.from_user.id):
             return
         await state.clear()
         text = "👑 **Admin Control Panel**\n\nWelcome back, Master. Select an option below to manage the bot:"
@@ -537,7 +558,7 @@ async def admin_panel_cmd(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "open_admin_panel")
 async def open_admin_panel_callback(callback: CallbackQuery, state: FSMContext) -> None:
     try:
-        if callback.from_user.id != ADMIN_ID:
+        if not await is_admin_user(callback.from_user.id):
             await callback.answer("🚫 Access Denied", show_alert=True)
             return
         await state.clear()
@@ -685,6 +706,41 @@ async def admin_check_user_result(message: Message, state: FSMContext) -> None:
     except Exception as e:
         logger.error(f"Error in admin_check_user_result: {e}")
 
+# --- MANAGE ADMINS LOGIC ---
+
+@router.callback_query(F.data == "admin_manage_admins")
+async def admin_manage_admins_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await state.set_state(AdminStates.waiting_for_add_admin)
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel")]])
+        text = (
+            "👑 **Manage Admins**\n\n"
+            "Please send the **Telegram User ID** of the person you want to make an Admin:\n\n"
+            "*(This person will have full access to the admin panel)*"
+        )
+        await callback.message.edit_text(text, reply_markup=cancel_kb, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in admin_manage_admins_prompt: {e}")
+
+@router.message(AdminStates.waiting_for_add_admin)
+async def admin_manage_admins_save(message: Message, state: FSMContext) -> None:
+    try:
+        new_admin_id = int(message.text.strip())
+        await settings_col.update_one(
+            {"_id": "admins"},
+            {"$addToSet": {"admin_list": new_admin_id}},
+            upsert=True
+        )
+        await message.reply(f"✅ User ID `{new_admin_id}` has been successfully added as an Admin!", reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+        await state.clear()
+    except ValueError:
+        await message.reply("⚠️ Please enter a valid numerical User ID.", reply_markup=get_admin_panel_keyboard())
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Error adding admin: {e}")
+        await message.reply("⚠️ Error adding admin. Check logs.", reply_markup=get_admin_panel_keyboard())
+        await state.clear()
+
 # --- CURRENTLY USERS LOGIC ---
 
 @router.callback_query(F.data == "admin_currently_users")
@@ -760,25 +816,43 @@ async def prompt_rem_bal(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 @router.message(AdminStates.waiting_for_add_balance_amount)
-async def execute_add_bal(message: Message, state: FSMContext) -> None:
+async def execute_add_bal(message: Message, state: FSMContext, bot: Bot) -> None:
     try:
         amount = int(message.text.strip())
         data = await state.get_data()
         uid = data.get("target_user_id")
+        
         await users_col.update_one({"user_id": uid}, {"$inc": {"balance": amount}})
         await message.reply(f"✅ ₹{amount} added to user `{uid}`.", reply_markup=get_admin_panel_keyboard())
+        
+        # User Notification
+        if uid:
+            try:
+                await bot.send_message(uid, f"🔔 **Balance Update!**\n\n✅ ₹{amount} has been added to your wallet by the Admin.")
+            except Exception as e:
+                logger.error(f"Could not notify user {uid}: {e}")
+                
         await state.clear()
     except ValueError:
         await message.reply("⚠️ Invalid format. Please send numbers only.")
 
 @router.message(AdminStates.waiting_for_remove_balance_amount)
-async def execute_rem_bal(message: Message, state: FSMContext) -> None:
+async def execute_rem_bal(message: Message, state: FSMContext, bot: Bot) -> None:
     try:
         amount = int(message.text.strip())
         data = await state.get_data()
         uid = data.get("target_user_id")
+        
         await users_col.update_one({"user_id": uid}, {"$inc": {"balance": -amount}})
         await message.reply(f"✅ ₹{amount} removed from user `{uid}`.", reply_markup=get_admin_panel_keyboard())
+        
+        # User Notification
+        if uid:
+            try:
+                await bot.send_message(uid, f"🔔 **Balance Update!**\n\n⚠️ ₹{amount} has been deducted from your wallet by the Admin.")
+            except Exception as e:
+                logger.error(f"Could not notify user {uid}: {e}")
+
         await state.clear()
     except ValueError:
         await message.reply("⚠️ Invalid format. Please send numbers only.")
@@ -837,7 +911,10 @@ async def admin_view_user_subs(callback: CallbackQuery, bot: Bot) -> None:
         
         sub_id = str(sub["_id"])
         action_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Mark Checked & Add Balance", callback_data=f"clear_and_add_{sub_id}")]
+            [
+                InlineKeyboardButton(text="✅ Accept", callback_data=f"accept_sub_{sub_id}"),
+                InlineKeyboardButton(text="❌ Deny", callback_data=f"deny_sub_{sub_id}")
+            ]
         ])
         
         photo_id = sub.get("photo_id")
@@ -860,26 +937,22 @@ async def admin_view_user_subs(callback: CallbackQuery, bot: Bot) -> None:
     except Exception as e:
         logger.error(f"Error opening user submission: {e}")
 
-@router.callback_query(F.data.startswith("clear_and_add_"))
-async def admin_clear_and_add_balance(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data.startswith("accept_sub_"))
+async def admin_accept_sub(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         sub_id = callback.data.split("_")[-1]
         sub = await submissions_col.find_one({"_id": ObjectId(sub_id)})
-        if not sub:
-            await callback.answer("Submission already cleared.", show_alert=True)
+        
+        if not sub or sub.get("status") != "pending":
+            await callback.answer("Submission already processed.", show_alert=True)
             return
             
-        await submissions_col.update_one(
-            {"_id": ObjectId(sub_id)},
-            {"$set": {"status": "checked"}}
-        )
-        
         user_id = sub["user_id"]
         
         await state.set_state(AdminStates.waiting_for_submission_balance)
-        await state.update_data(target_user_id=user_id)
+        await state.update_data(target_user_id=user_id, target_sub_id=sub_id)
         
-        prompt_text = "\n\n✅ **STATUS: CHECKED**\n\n👉 **Please type how much balance to add for this successful task:**"
+        prompt_text = "\n\n✅ **STATUS: ACCEPTING**\n\n👉 **Please type how much balance to add for this successful task:**"
         
         if callback.message.caption:
             await callback.message.edit_caption(
@@ -891,12 +964,12 @@ async def admin_clear_and_add_balance(callback: CallbackQuery, state: FSMContext
                 text=callback.message.text + prompt_text,
                 reply_markup=None
             )
-        await callback.answer("Cleared! Enter balance now.")
+        await callback.answer("Enter balance to add.")
     except Exception as e:
-        logger.error(f"Error in clear_and_add: {e}")
+        logger.error(f"Error in accept_sub: {e}")
 
 @router.message(AdminStates.waiting_for_submission_balance)
-async def process_submission_balance(message: Message, state: FSMContext) -> None:
+async def process_submission_balance(message: Message, state: FSMContext, bot: Bot) -> None:
     try:
         if not message.text:
             await message.reply("⚠️ Please enter a valid numerical amount.")
@@ -905,6 +978,13 @@ async def process_submission_balance(message: Message, state: FSMContext) -> Non
         amount = int(message.text.strip())
         data = await state.get_data()
         target_id = data.get("target_user_id")
+        sub_id = data.get("target_sub_id")
+        
+        if sub_id:
+            await submissions_col.update_one(
+                {"_id": ObjectId(sub_id)},
+                {"$set": {"status": "accepted"}}
+            )
         
         if target_id:
             await users_col.update_one(
@@ -912,11 +992,77 @@ async def process_submission_balance(message: Message, state: FSMContext) -> Non
                 {"$inc": {"balance": amount}}
             )
             await message.reply(f"✅ Successfully added ₹{amount} to User `{target_id}`'s balance.", parse_mode="Markdown")
+            
+            # User Notification
+            try:
+                await bot.send_message(target_id, f"🎉 **Work Accepted!**\n\nYour recent work submission was approved.\n💰 **Balance Added:** ₹{amount}")
+            except Exception as e:
+                logger.error(f"Could not notify user {target_id}: {e}")
+                
         await state.clear()
     except ValueError:
         await message.reply("⚠️ Please enter a valid number (e.g., 500).")
     except Exception as e:
         logger.error(f"Error adding sub balance: {e}")
+        await state.clear()
+
+@router.callback_query(F.data.startswith("deny_sub_"))
+async def admin_deny_sub(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        sub_id = callback.data.split("_")[-1]
+        sub = await submissions_col.find_one({"_id": ObjectId(sub_id)})
+        
+        if not sub or sub.get("status") != "pending":
+            await callback.answer("Submission already processed.", show_alert=True)
+            return
+            
+        user_id = sub["user_id"]
+        
+        await state.set_state(AdminStates.waiting_for_deny_reason)
+        await state.update_data(target_user_id=user_id, target_sub_id=sub_id)
+        
+        prompt_text = "\n\n❌ **STATUS: DENYING**\n\n👉 **Please type the reason for denying this work submission:**"
+        
+        if callback.message.caption:
+            await callback.message.edit_caption(
+                caption=callback.message.caption + prompt_text,
+                reply_markup=None
+            )
+        else:
+            await callback.message.edit_text(
+                text=callback.message.text + prompt_text,
+                reply_markup=None
+            )
+        await callback.answer("Enter denial reason.")
+    except Exception as e:
+        logger.error(f"Error in deny_sub: {e}")
+
+@router.message(AdminStates.waiting_for_deny_reason)
+async def process_deny_reason(message: Message, state: FSMContext, bot: Bot) -> None:
+    try:
+        reason = message.text.strip()
+        data = await state.get_data()
+        target_id = data.get("target_user_id")
+        sub_id = data.get("target_sub_id")
+        
+        if sub_id:
+            await submissions_col.update_one(
+                {"_id": ObjectId(sub_id)},
+                {"$set": {"status": "denied", "deny_reason": reason}}
+            )
+        
+        await message.reply(f"✅ Submission marked as DENIED for User `{target_id}`.", parse_mode="Markdown")
+        
+        # User Notification
+        if target_id:
+            try:
+                await bot.send_message(target_id, f"❌ **Work Denied!**\n\nYour recent work submission was declined.\n📝 **Reason:** {reason}")
+            except Exception as e:
+                logger.error(f"Could not notify user {target_id}: {e}")
+                
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Error denying sub: {e}")
         await state.clear()
 
 # --- OTHER ADMIN PANEL COMMANDS ---
@@ -991,7 +1137,7 @@ async def admin_close_panel(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(Command("add_user"))
 async def admin_add_user(message: Message) -> None:
     try:
-        if message.from_user.id != ADMIN_ID:
+        if not await is_admin_user(message.from_user.id):
             return
             
         args = message.text.split(maxsplit=1)
@@ -1042,9 +1188,9 @@ async def admin_add_user(message: Message) -> None:
         await message.reply("Error updating user. Check logs.")
 
 @router.message(Command("add_balance"))
-async def admin_add_balance(message: Message) -> None:
+async def admin_add_balance(message: Message, bot: Bot) -> None:
     try:
-        if message.from_user.id != ADMIN_ID:
+        if not await is_admin_user(message.from_user.id):
             return
             
         args = message.text.split()
@@ -1062,6 +1208,11 @@ async def admin_add_balance(message: Message) -> None:
         
         if result.modified_count > 0:
             await message.reply(f"✅ Successfully added ₹{amount} to User `{target_id}`'s balance. (Manual Update)", parse_mode="Markdown")
+            # User Notification
+            try:
+                await bot.send_message(target_id, f"🔔 **Balance Update!**\n\n✅ ₹{amount} has been added to your wallet by the Admin.")
+            except Exception:
+                pass
         else:
             await message.reply(f"⚠️ User `{target_id}` not found in DB.", parse_mode="Markdown")
     except Exception as e:
@@ -1071,7 +1222,7 @@ async def admin_add_balance(message: Message) -> None:
 @router.message(Command("set_work_link"))
 async def admin_set_work_link(message: Message) -> None:
     try:
-        if message.from_user.id != ADMIN_ID:
+        if not await is_admin_user(message.from_user.id):
             return
         args = message.text.split(maxsplit=1)
         if len(args) != 2:
@@ -1090,7 +1241,7 @@ async def admin_set_work_link(message: Message) -> None:
 @router.message(Command("set_proof_link"))
 async def admin_set_proof_link(message: Message) -> None:
     try:
-        if message.from_user.id != ADMIN_ID:
+        if not await is_admin_user(message.from_user.id):
             return
         args = message.text.split(maxsplit=1)
         if len(args) != 2:
@@ -1109,7 +1260,7 @@ async def admin_set_proof_link(message: Message) -> None:
 @router.message(Command("submissions"))
 async def admin_view_submissions(message: Message) -> None:
     try:
-        if message.from_user.id != ADMIN_ID:
+        if not await is_admin_user(message.from_user.id):
             return
             
         pipeline = [
