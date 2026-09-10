@@ -51,25 +51,26 @@ router = Router()
 # FAKE DATA & LOGIC
 # ==========================================
 
+# Names are now fully mixed naturally for a professional look across all months.
 FAKE_NAMES: List[str] = [
-    "Rohit Verma", "Mohit Sharma", "Shyam Tiwari", "Ankit Gupta", "Vikas Singh", 
-    "Saurabh Mishra", "Gaurav Jain", "Neeraj Yadav", "Manish Patel", "Suresh Kumar", 
-    "Ramesh Rajput", "Dinesh Saini", "Pankaj Joshi", "Pradeep Meena", "Manoj Agarwal", 
-    "Nitin Bhatia", "Naveen Chawla", "Praveen Dixit", "Ashish Garg", "Vishal Jha", 
-    "Sumit Khandelwal", "Alok Pandey", "Yogesh Rathi", "Lokesh Thakur", "Sandeep Bansal", 
-    "Kuldeep Chauhan", "Mandeep Dalal", "Hemant Goswami", "Ravi Khatri", "Tarun Lamba", 
-    "Vinit Mathur", "Harish Saxena", "Girish Ojha", "Kailash Parashar", "Prakash Rathore", 
-    "Omkar Dubey", "Shivam Tomar", "Satish Upadhyay", "Dhruv Vyas", "Kamlesh Wadhwa", 
-    "Brijesh Yadav", "Jatin Arora", "Gagan Bhardwaj", "Aman Chaturvedi", "Akash Kaushik", 
-    "Sagar Gautam", "Suraj Hooda", "Akhil Jaiswal", "Rajat Madaan", "Rupesh Lohar", 
-    "Ram Makwana", "Mayank Negi", "Dheeraj Pal", "Chirag Rawat", "Piyush Sonkar", 
-    "Tushar Tyagi", "Naman Upreti", "Chetan Vashisht", "Lakshay Wadhawan", "Bhuvan Yagnik", 
-    "Payal Soni", "Ankita Mahajan", "Jagriti Pathak", "Shikha Rastogi", "Megha Srivastav", 
-    "Nikita Tandon", "Swati Varshney", "Ritu Yadav", "Tariq Anwar", "Zeeshan Ali", 
-    "Faisal Shaikh", "Rizwan Ahmed", "Adil Siddiqui", "Asif Ansari", "Kashif Baig", 
-    "Noman Mirza", "Rehan Qureshi", "Samir Malik", "Usman Sayyed", "Bilal Hashmi", 
-    "Haris Farooqui", "Junaid Mansuri", "Yaseen Pathan", "Danish Raza", "Shoaib Usmani", 
-    "Nadeem Shah", "Altaf Hussain", "Majid Inamdar", "Sadiya Bano", "Zainab Khatoon"
+    "Rohit Verma", "Tariq Anwar", "Mohit Sharma", "Zeeshan Ali", "Shyam Tiwari", 
+    "Faisal Shaikh", "Ankit Gupta", "Rizwan Ahmed", "Vikas Singh", "Adil Siddiqui", 
+    "Saurabh Mishra", "Asif Ansari", "Gaurav Jain", "Kashif Baig", "Neeraj Yadav", 
+    "Noman Mirza", "Manish Patel", "Rehan Qureshi", "Suresh Kumar", "Samir Malik", 
+    "Ramesh Rajput", "Usman Sayyed", "Dinesh Saini", "Bilal Hashmi", "Pankaj Joshi", 
+    "Haris Farooqui", "Pradeep Meena", "Junaid Mansuri", "Manoj Agarwal", "Yaseen Pathan", 
+    "Nitin Bhatia", "Danish Raza", "Naveen Chawla", "Shoaib Usmani", "Praveen Dixit", 
+    "Nadeem Shah", "Ashish Garg", "Altaf Hussain", "Vishal Jha", "Majid Inamdar", 
+    "Sumit Khandelwal", "Sadiya Bano", "Alok Pandey", "Zainab Khatoon", "Yogesh Rathi", 
+    "Lokesh Thakur", "Sandeep Bansal", "Kuldeep Chauhan", "Mandeep Dalal", "Hemant Goswami", 
+    "Ravi Khatri", "Tarun Lamba", "Vinit Mathur", "Harish Saxena", "Girish Ojha", 
+    "Kailash Parashar", "Prakash Rathore", "Omkar Dubey", "Shivam Tomar", "Satish Upadhyay", 
+    "Dhruv Vyas", "Kamlesh Wadhwa", "Brijesh Yadav", "Jatin Arora", "Gagan Bhardwaj", 
+    "Aman Chaturvedi", "Akash Kaushik", "Sagar Gautam", "Suraj Hooda", "Akhil Jaiswal", 
+    "Rajat Madaan", "Rupesh Lohar", "Ram Makwana", "Mayank Negi", "Dheeraj Pal", 
+    "Chirag Rawat", "Piyush Sonkar", "Tushar Tyagi", "Naman Upreti", "Chetan Vashisht", 
+    "Lakshay Wadhawan", "Bhuvan Yagnik", "Payal Soni", "Ankita Mahajan", "Jagriti Pathak", 
+    "Shikha Rastogi", "Megha Srivastav", "Nikita Tandon", "Swati Varshney", "Ritu Yadav"
 ]
 
 # Total 90 names divided optimally, with exactly 12 in September
@@ -188,7 +189,15 @@ class AdminStates(StatesGroup):
 # ==========================================
 
 def get_main_menu_keyboard(work_link: str, proof_link: str, is_admin: bool = False) -> InlineKeyboardMarkup:
-    # Perfected UI Layout as requested
+    # URL Sanitization logic to PREVENT CRASHES if admin sets an invalid link like "@username"
+    def sanitize_url(url: str) -> str:
+        url = url.strip()
+        if url.startswith("@"):
+            return f"https://t.me/{url[1:]}"
+        if not url.startswith("http://") and not url.startswith("https://"):
+            return f"https://{url}"
+        return url
+
     kb = [
         [
             InlineKeyboardButton(text="💸 Approved Withdrawals", callback_data="withdrawal_list")
@@ -205,10 +214,10 @@ def get_main_menu_keyboard(work_link: str, proof_link: str, is_admin: bool = Fal
             InlineKeyboardButton(text="📝 Submit Work", callback_data="submit_work")
         ],
         [
-            InlineKeyboardButton(text="🚀 Start Work Now", url=work_link)
+            InlineKeyboardButton(text="🚀 Start Work Now", url=sanitize_url(work_link))
         ],
         [
-            InlineKeyboardButton(text="🧾 Payment Screenshot Proof", url=proof_link)
+            InlineKeyboardButton(text="🧾 Payment Screenshot Proof", url=sanitize_url(proof_link))
         ]
     ]
     
@@ -470,12 +479,10 @@ async def process_work_photo(message: Message, state: FSMContext, bot: Bot) -> N
         await message.reply("🎉 **Work submitted successfully!**\nAdmin will review your work and update your payment manually.")
         await state.clear()
         
-        # Notify Admin
-        if ADMIN_ID != 0:
-            await bot.send_message(
-                ADMIN_ID,
-                f"📥 **New Work Submission!**\n👤 By: {message.from_user.first_name}\n\nUse Admin Panel or `/submissions` to review it."
-            )
+        # Note for Admin: Notification disabled as requested. Check manually via "Pending Submissions" button.
+        # if ADMIN_ID != 0:
+        #     await bot.send_message(...)
+            
     except Exception as e:
         logger.error(f"Error saving submission: {e}")
         await message.reply("⚠️ Failed to submit work. Please try again.")
