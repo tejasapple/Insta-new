@@ -128,6 +128,7 @@ async def register_user_if_not_exists(user_id: int, username: str, first_name: s
                 "first_name": first_name,
                 "is_active": False,
                 "balance": 0,
+                "submission_count": 0,  # Added to track user usage
                 "join_date": datetime.now(),
                 "approval_date": None
             })
@@ -155,6 +156,11 @@ class WorkSubmission(StatesGroup):
     waiting_for_link = State()
     waiting_for_photo = State()
 
+class AdminStates(StatesGroup):
+    waiting_for_work_link = State()
+    waiting_for_proof_link = State()
+    waiting_for_user_query = State()
+
 # ==========================================
 # KEYBOARDS
 # ==========================================
@@ -179,6 +185,26 @@ def get_main_menu_keyboard(work_link: str, proof_link: str) -> InlineKeyboardMar
             ],
             [
                 InlineKeyboardButton(text="🧾 Payment Screenshot Proof", url=proof_link)
+            ]
+        ]
+    )
+
+def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 Bot Stats", callback_data="admin_stats"),
+                InlineKeyboardButton(text="🔍 Check User", callback_data="admin_check_user")
+            ],
+            [
+                InlineKeyboardButton(text="📝 Pending Submissions", callback_data="admin_pending_subs")
+            ],
+            [
+                InlineKeyboardButton(text="🔗 Set Work Link", callback_data="admin_set_work"),
+                InlineKeyboardButton(text="🔗 Set Proof Link", callback_data="admin_set_proof")
+            ],
+            [
+                InlineKeyboardButton(text="❌ Close Panel", callback_data="admin_close")
             ]
         ]
     )
@@ -394,6 +420,12 @@ async def process_work_photo(message: Message, state: FSMContext, bot: Bot) -> N
         }
         await submissions_col.insert_one(sub_doc)
         
+        # Track User Usage / Update Submission Count
+        await users_col.update_one(
+            {"user_id": message.from_user.id},
+            {"$inc": {"submission_count": 1}}
+        )
+        
         await message.reply("🎉 **Work submitted successfully!**\nAdmin will review your work and update your payment manually.")
         await state.clear()
         
@@ -401,7 +433,7 @@ async def process_work_photo(message: Message, state: FSMContext, bot: Bot) -> N
         if ADMIN_ID != 0:
             await bot.send_message(
                 ADMIN_ID,
-                f"📥 **New Work Submission!**\n👤 By: {message.from_user.first_name}\n\nUse `/submissions` to review it."
+                f"📥 **New Work Submission!**\n👤 By: {message.from_user.first_name}\n\nUse Admin Panel or `/submissions` to review it."
             )
     except Exception as e:
         logger.error(f"Error saving submission: {e}")
@@ -422,7 +454,175 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
         logger.error(f"Error in back_to_menu: {e}")
 
 # ==========================================
-# ADMIN COMMANDS
+# ADMIN PANEL (NEW FULL CONTROL LOGIC)
+# ==========================================
+
+@router.message(Command("admin"))
+async def admin_panel_cmd(message: Message, state: FSMContext) -> None:
+    try:
+        if message.from_user.id != ADMIN_ID:
+            return
+        await state.clear()
+        text = "👑 **Admin Control Panel**\n\nWelcome back, Master. Select an option below to manage the bot:"
+        await message.reply(text, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in admin command: {e}")
+
+@router.callback_query(F.data == "admin_stats")
+async def admin_show_stats(callback: CallbackQuery) -> None:
+    try:
+        total_users = await users_col.count_documents({})
+        active_users = await users_col.count_documents({"is_active": True})
+        total_subs = await submissions_col.count_documents({})
+        pending_subs = await submissions_col.count_documents({"status": "pending"})
+        
+        text = (
+            "📊 **Bot Statistics**\n\n"
+            f"👥 **Total Users:** {total_users}\n"
+            f"✅ **Active Members:** {active_users}\n"
+            f"📥 **Total Submissions:** {total_subs}\n"
+            f"⏳ **Pending Submissions:** {pending_subs}"
+        )
+        await callback.message.edit_text(text, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in admin_stats: {e}")
+
+@router.callback_query(F.data == "admin_check_user")
+async def admin_check_user_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await state.set_state(AdminStates.waiting_for_user_query)
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel")]])
+        await callback.message.edit_text("🔍 **Check User**\n\nPlease send the User ID, @username, or First Name of the user:", reply_markup=cancel_kb, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in admin_check_user_prompt: {e}")
+
+@router.message(AdminStates.waiting_for_user_query)
+async def admin_check_user_result(message: Message, state: FSMContext) -> None:
+    try:
+        query = message.text.strip()
+        if query.startswith("@"):
+            query = query[1:]
+            
+        db_query = {}
+        if query.isdigit():
+            db_query = {"user_id": int(query)}
+        else:
+            db_query = {"$or": [
+                {"username": {"$regex": f"^{query}$", "$options": "i"}},
+                {"first_name": {"$regex": f"^{query}$", "$options": "i"}}
+            ]}
+            
+        users = await users_col.find(db_query).to_list(5)
+        
+        if not users:
+            await message.reply(f"⚠️ No user found for `{query}`.", reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+            await state.clear()
+            return
+            
+        for u in users:
+            join_date = u.get("join_date", datetime.now()).strftime("%Y-%m-%d")
+            status = "✅ Active" if u.get("is_active") else "🚫 Inactive"
+            text = (
+                f"👤 **User Info:**\n\n"
+                f"**Name:** {u.get('first_name')}\n"
+                f"**Username:** @{u.get('username', 'N/A')}\n"
+                f"**ID:** `{u.get('user_id')}`\n"
+                f"**Status:** {status}\n"
+                f"**Balance:** ₹{u.get('balance', 0)}\n"
+                f"**Total Submissions:** {u.get('submission_count', 0)}\n"
+                f"**Joined:** {join_date}"
+            )
+            await message.reply(text, parse_mode="Markdown")
+            
+        await message.answer("Select another action:", reply_markup=get_admin_panel_keyboard())
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Error in admin_check_user_result: {e}")
+
+@router.callback_query(F.data == "admin_pending_subs")
+async def admin_show_pending_subs(callback: CallbackQuery) -> None:
+    try:
+        subs = await submissions_col.find({"status": "pending"}).to_list(50)
+        if not subs:
+            await callback.answer("✅ No pending work submissions.", show_alert=True)
+            return
+            
+        kb = InlineKeyboardBuilder()
+        for s in subs:
+            kb.button(text=f"📄 {s.get('user_name', 'User')}", callback_data=f"view_sub_{str(s['_id'])}")
+        
+        kb.button(text="🔙 Back to Panel", callback_data="admin_cancel")
+        kb.adjust(1)
+        
+        await callback.message.edit_text("📋 **Pending Work Submissions:**\nClick on a name to view their submitted link and screenshot:", reply_markup=kb.as_markup(), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in admin_pending_subs: {e}")
+
+@router.callback_query(F.data == "admin_set_work")
+async def admin_set_work_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await state.set_state(AdminStates.waiting_for_work_link)
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel")]])
+        await callback.message.edit_text("🔗 **Set Work Link**\n\nPlease send the new URL for the 'Start Work Now' button:", reply_markup=cancel_kb, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in admin_set_work_prompt: {e}")
+
+@router.message(AdminStates.waiting_for_work_link)
+async def admin_set_work_save(message: Message, state: FSMContext) -> None:
+    try:
+        new_link = message.text.strip()
+        await settings_col.update_one(
+            {"_id": "global_links"},
+            {"$set": {"work_link": new_link}},
+            upsert=True
+        )
+        await message.reply(f"✅ 'Start Work Now' button link updated successfully!\n\nNew Link: {new_link}", reply_markup=get_admin_panel_keyboard())
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Error saving work link: {e}")
+
+@router.callback_query(F.data == "admin_set_proof")
+async def admin_set_proof_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await state.set_state(AdminStates.waiting_for_proof_link)
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="admin_cancel")]])
+        await callback.message.edit_text("🔗 **Set Proof Link**\n\nPlease send the new URL for the 'Payment Screenshot Proof' button:", reply_markup=cancel_kb, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in admin_set_proof_prompt: {e}")
+
+@router.message(AdminStates.waiting_for_proof_link)
+async def admin_set_proof_save(message: Message, state: FSMContext) -> None:
+    try:
+        new_link = message.text.strip()
+        await settings_col.update_one(
+            {"_id": "global_links"},
+            {"$set": {"proof_link": new_link}},
+            upsert=True
+        )
+        await message.reply(f"✅ 'Payment Screenshot Proof' button link updated successfully!\n\nNew Link: {new_link}", reply_markup=get_admin_panel_keyboard())
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Error saving proof link: {e}")
+
+@router.callback_query(F.data == "admin_cancel")
+async def admin_cancel_action(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await state.clear()
+        text = "👑 **Admin Control Panel**\n\nWelcome back, Master. Select an option below to manage the bot:"
+        await callback.message.edit_text(text, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in admin_cancel: {e}")
+
+@router.callback_query(F.data == "admin_close")
+async def admin_close_panel(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await state.clear()
+        await callback.message.delete()
+    except Exception as e:
+        logger.error(f"Error closing admin panel: {e}")
+
+# ==========================================
+# OLD ADMIN COMMANDS (Preserved as requested)
 # ==========================================
 
 @router.message(Command("add_user"))
