@@ -51,6 +51,32 @@ submissions_col: AgnosticCollection = db["submissions"]
 settings_col: AgnosticCollection = db["settings"]
 
 # ==========================================
+# LOCAL MEDIA STORAGE (NOT IN MONGO)
+# ==========================================
+MEDIA_FILE = "local_media_storage.json"
+
+def load_media() -> Dict[str, Any]:
+    default_data = {
+        "dp_storage": {"step1": [], "step2": [], "step3": [], "step4": []},
+        "dp_bank": []
+    }
+    if not os.path.exists(MEDIA_FILE):
+        return default_data
+    try:
+        with open(MEDIA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading media JSON, returning default: {e}")
+        return default_data
+
+def save_media(data: Dict[str, Any]) -> None:
+    try:
+        with open(MEDIA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        logger.error(f"Error saving media JSON: {e}")
+
+# ==========================================
 # HELPER FUNCTIONS
 # ==========================================
 
@@ -271,6 +297,9 @@ class AdminStates(StatesGroup):
     waiting_for_broadcast_msg = State()
     waiting_for_dump_channel_link = State() 
     waiting_for_dump_total_videos = State()
+    # New States for Local Media System
+    waiting_for_dp_storage_media = State()
+    waiting_for_dp_bank_media = State()
 
 # ==========================================
 # KEYBOARDS
@@ -320,6 +349,10 @@ async def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="📊 Bot Stats", callback_data="admin_stats"),
                 InlineKeyboardButton(text="➕ Add User", callback_data="admin_add_user_panel")
+            ],
+            [
+                InlineKeyboardButton(text="🖼️ DP Storage", callback_data="admin_dp_storage_menu"),
+                InlineKeyboardButton(text="🏦 DP Bank", callback_data="admin_dp_bank_menu") 
             ],
             [
                 InlineKeyboardButton(text="🔍 Check User", callback_data="admin_check_user"),
@@ -455,6 +488,20 @@ async def show_balance(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
         user = await get_user(callback.from_user.id)
+        
+        # New Logic: Professional denial for normal/inactive users
+        if not user or not user.get("is_active"):
+            text = (
+                "🚫 **Access Restricted**\n\n"
+                "You are not currently employed with us as a verified staff member. "
+                "This wallet feature and dashboard are restricted to official employees only.\n\n"
+                "💼 *If you wish to join our team, please use the 'Apply to work' button on the main menu.*"
+            )
+            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]]
+            ))
+            return
+
         balance = user.get("balance", 0)
         text = (
             f"💰 **My Wallet Balance**\n\n"
@@ -576,6 +623,7 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         step = user.get("schedule_step", 0)
         last_work_time = user.get("last_work_time")
         now = datetime.now()
+        is_admin = await is_admin_user(callback.from_user.id)
         
         # Step timing logic
         if step == 0:
@@ -591,12 +639,16 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             next_allowed = last_work_time + timedelta(hours=8)
             required_batches = 4
 
+        # Admin Bypass logic
         if next_allowed and now < next_allowed:
-            wait_time = next_allowed - now
-            hours, remainder = divmod(wait_time.total_seconds(), 3600)
-            minutes = remainder // 60
-            await callback.answer(f"⏳ Next batch is locked.\n\nPlease wait {int(hours)} hours and {int(minutes)} minutes.", show_alert=True)
-            return
+            if is_admin:
+                await callback.answer("🛠️ Admin Bypass: Timer ignored for testing.", show_alert=False)
+            else:
+                wait_time = next_allowed - now
+                hours, remainder = divmod(wait_time.total_seconds(), 3600)
+                minutes = remainder // 60
+                await callback.answer(f"⏳ Next batch is locked.\n\nPlease wait {int(hours)} hours and {int(minutes)} minutes.", show_alert=True)
+                return
 
         # Fetch dump settings
         dump_settings = await settings_col.find_one({"_id": "dump_settings"})
@@ -880,7 +932,240 @@ async def admin_backup(callback: CallbackQuery, bot: Bot) -> None:
         logger.error(f"Error generating backup: {e}")
         await callback.answer("⚠️ Failed to generate backup.", show_alert=True)
 
-# --- SINGLE DUMP CHANNEL LOGIC (NEW) ---
+# --- DP STORAGE & DP BANK (LOCAL JSON) ---
+
+@router.callback_query(F.data == "admin_dp_storage_menu")
+async def dp_storage_menu(callback: CallbackQuery) -> None:
+    try:
+        await callback.answer()
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📁 Step 1", callback_data="dp_view_step1"), InlineKeyboardButton(text="📁 Step 2", callback_data="dp_view_step2")],
+            [InlineKeyboardButton(text="📁 Step 3", callback_data="dp_view_step3"), InlineKeyboardButton(text="📁 Step 4", callback_data="dp_view_step4")],
+            [InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]
+        ])
+        await callback.message.edit_text("🖼️ **DP Storage (Steps)**\n\nLocal storage for your media. Select a step to view or add items:", reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Error in dp_storage_menu: {e}")
+
+@router.callback_query(F.data.startswith("dp_view_"))
+async def view_dp_step(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await callback.answer()
+        step = callback.data.split("_")[-1]
+        media_data = load_media()
+        items = media_data.get("dp_storage", {}).get(step, [])
+        
+        text = f"📁 **{step.capitalize()} Storage**\nTotal Items: `{len(items)}`\n\nWhat would you like to do?"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Add Media", callback_data=f"dp_add_{step}"), InlineKeyboardButton(text="👁️ View All", callback_data=f"dp_show_{step}")],
+            [InlineKeyboardButton(text="🗑️ Clear Step", callback_data=f"dp_clear_{step}")],
+            [InlineKeyboardButton(text="« Back", callback_data="admin_dp_storage_menu")]
+        ])
+        await callback.message.edit_text(text, reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Error in view_dp_step: {e}")
+
+@router.callback_query(F.data.startswith("dp_add_"))
+async def add_dp_step_media(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await callback.answer()
+        step = callback.data.split("_")[-1]
+        await state.set_state(AdminStates.waiting_for_dp_storage_media)
+        await state.update_data(dp_step=step)
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data=f"dp_view_{step}")]])
+        await callback.message.edit_text(f"📤 **Adding to {step.capitalize()}**\n\nPlease send a Photo, Video, or Text message to store it locally:", reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Error in add_dp_step_media: {e}")
+
+@router.message(AdminStates.waiting_for_dp_storage_media)
+async def receive_dp_storage_media(message: Message, state: FSMContext) -> None:
+    try:
+        data = await state.get_data()
+        step = data.get("dp_step")
+        if not step:
+            return
+
+        file_id = None
+        media_type = None
+
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            media_type = "photo"
+        elif message.video:
+            file_id = message.video.file_id
+            media_type = "video"
+        elif message.text:
+            file_id = message.text
+            media_type = "text"
+
+        if not file_id:
+            await message.reply("⚠️ Unsupported format. Please send a Photo, Video, or Text.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"dp_view_{step}")]]))
+            return
+
+        media_data = load_media()
+        media_data["dp_storage"][step].append({"type": media_type, "content": file_id})
+        save_media(media_data)
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Step Menu", callback_data=f"dp_view_{step}")]])
+        await message.reply(f"✅ Item saved to **{step.capitalize()}**!\n\nYou can keep sending more media to save, or go back.", reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Error in receive_dp_storage_media: {e}")
+
+@router.callback_query(F.data.startswith("dp_show_"))
+async def show_dp_step_media(callback: CallbackQuery, bot: Bot) -> None:
+    try:
+        await callback.answer()
+        step = callback.data.split("_")[-1]
+        media_data = load_media()
+        items = media_data.get("dp_storage", {}).get(step, [])
+        
+        if not items:
+            await callback.message.answer(f"⚠️ **{step.capitalize()} is empty.**", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"dp_view_{step}")]]))
+            return
+            
+        await callback.message.answer(f"📂 **Showing all items in {step.capitalize()} ({len(items)} items):**")
+        for item in items:
+            m_type = item["type"]
+            content = item["content"]
+            try:
+                if m_type == "photo":
+                    await bot.send_photo(callback.from_user.id, photo=content)
+                elif m_type == "video":
+                    await bot.send_video(callback.from_user.id, video=content)
+                elif m_type == "text":
+                    await bot.send_message(callback.from_user.id, text=content)
+            except Exception as ex:
+                logger.warning(f"Failed to send {m_type} from storage: {ex}")
+            await asyncio.sleep(0.3)
+            
+    except Exception as e:
+        logger.error(f"Error in show_dp_step_media: {e}")
+
+@router.callback_query(F.data.startswith("dp_clear_"))
+async def clear_dp_step(callback: CallbackQuery) -> None:
+    try:
+        step = callback.data.split("_")[-1]
+        media_data = load_media()
+        media_data["dp_storage"][step] = []
+        save_media(media_data)
+        await callback.answer(f"✅ {step.capitalize()} cleared successfully!", show_alert=True)
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Add Media", callback_data=f"dp_add_{step}"), InlineKeyboardButton(text="👁️ View All", callback_data=f"dp_show_{step}")],
+            [InlineKeyboardButton(text="🗑️ Clear Step", callback_data=f"dp_clear_{step}")],
+            [InlineKeyboardButton(text="« Back", callback_data="admin_dp_storage_menu")]
+        ])
+        await callback.message.edit_text(f"📁 **{step.capitalize()} Storage**\nTotal Items: `0`\n\nWhat would you like to do?", reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Error in clear_dp_step: {e}")
+
+# --- DP BANK MENUS ---
+
+@router.callback_query(F.data == "admin_dp_bank_menu")
+async def dp_bank_menu(callback: CallbackQuery) -> None:
+    try:
+        await callback.answer()
+        media_data = load_media()
+        items = media_data.get("dp_bank", [])
+        
+        text = f"🏦 **DP Bank**\nTotal Photos: `{len(items)}`\n\nManage your massive collection of DPs:"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Add Photo", callback_data="dpbank_add")],
+            [InlineKeyboardButton(text="🎲 Random 1", callback_data="dpbank_random"), InlineKeyboardButton(text="👁️ View All", callback_data="dpbank_viewall")],
+            [InlineKeyboardButton(text="🗑️ Clear Bank", callback_data="dpbank_clear")],
+            [InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]
+        ])
+        await callback.message.edit_text(text, reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Error in dp_bank_menu: {e}")
+
+@router.callback_query(F.data == "dpbank_add")
+async def add_dpbank_photo(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await callback.answer()
+        await state.set_state(AdminStates.waiting_for_dp_bank_media)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="admin_dp_bank_menu")]])
+        await callback.message.edit_text("📤 **Adding to DP Bank**\n\nPlease send a **Photo** to store it locally in the bank:", reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Error in add_dpbank_photo: {e}")
+
+@router.message(AdminStates.waiting_for_dp_bank_media)
+async def receive_dp_bank_photo(message: Message, state: FSMContext) -> None:
+    try:
+        if not message.photo:
+            await message.reply("⚠️ **Photos only!** Please send a photo.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_dp_bank_menu")]]))
+            return
+
+        file_id = message.photo[-1].file_id
+        media_data = load_media()
+        media_data["dp_bank"].append(file_id)
+        save_media(media_data)
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to DP Bank", callback_data="admin_dp_bank_menu")]])
+        await message.reply("✅ Photo saved to DP Bank!\n\nYou can keep sending more photos to fill the bank.", reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Error in receive_dp_bank_photo: {e}")
+
+@router.callback_query(F.data == "dpbank_random")
+async def show_dpbank_random(callback: CallbackQuery, bot: Bot) -> None:
+    try:
+        await callback.answer()
+        media_data = load_media()
+        items = media_data.get("dp_bank", [])
+        
+        if not items:
+            await callback.message.answer("⚠️ DP Bank is empty.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_dp_bank_menu")]]))
+            return
+            
+        random_photo = random.choice(items)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to DP Bank", callback_data="admin_dp_bank_menu")]])
+        await bot.send_photo(callback.from_user.id, photo=random_photo, caption="🎲 **Random Photo from DP Bank**", reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Error in show_dpbank_random: {e}")
+
+@router.callback_query(F.data == "dpbank_viewall")
+async def show_dpbank_all(callback: CallbackQuery, bot: Bot) -> None:
+    try:
+        await callback.answer()
+        media_data = load_media()
+        items = media_data.get("dp_bank", [])
+        
+        if not items:
+            await callback.message.answer("⚠️ DP Bank is empty.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_dp_bank_menu")]]))
+            return
+            
+        await callback.message.answer(f"🏦 **Showing all {len(items)} photos in DP Bank:**")
+        for photo_id in items:
+            try:
+                await bot.send_photo(callback.from_user.id, photo=photo_id)
+            except Exception as ex:
+                logger.warning(f"Failed to send bank photo: {ex}")
+            await asyncio.sleep(0.3)
+            
+    except Exception as e:
+        logger.error(f"Error in show_dpbank_all: {e}")
+
+@router.callback_query(F.data == "dpbank_clear")
+async def clear_dpbank(callback: CallbackQuery) -> None:
+    try:
+        media_data = load_media()
+        media_data["dp_bank"] = []
+        save_media(media_data)
+        await callback.answer("✅ DP Bank cleared successfully!", show_alert=True)
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Add Photo", callback_data="dpbank_add")],
+            [InlineKeyboardButton(text="🎲 Random 1", callback_data="dpbank_random"), InlineKeyboardButton(text="👁️ View All", callback_data="dpbank_viewall")],
+            [InlineKeyboardButton(text="🗑️ Clear Bank", callback_data="dpbank_clear")],
+            [InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]
+        ])
+        await callback.message.edit_text("🏦 **DP Bank**\nTotal Photos: `0`\n\nManage your massive collection of DPs:", reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Error in clear_dpbank: {e}")
+
+
+# --- SINGLE DUMP CHANNEL LOGIC (UPDATED WITH FORWARD FIX) ---
 
 @router.callback_query(F.data == "admin_set_dump_channel")
 async def admin_set_dump_channel_prompt(callback: CallbackQuery, state: FSMContext) -> None:
@@ -890,9 +1175,9 @@ async def admin_set_dump_channel_prompt(callback: CallbackQuery, state: FSMConte
         cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
         text = (
             "📥 **Set Dump Channel**\n\n"
-            "Please send the Telegram link to the **FIRST** video message in your Dump Channel.\n\n"
-            "*Example:* `https://t.me/c/123456789/2` or `https://t.me/dumpchannel/5`\n\n"
-            "*(Bot will automatically calculate batches based on this and fetch without downloading)*"
+            "To accurately fetch videos, please **FORWARD** the **FIRST** video message from your Dump Channel here.\n\n"
+            "*(Alternatively, if it's a public channel, you can send the raw message link like `https://t.me/c/123456789/2`)*\n\n"
+            "⚠️ *Invite links (like `t.me/+xyz`) will not work directly.*"
         )
         await callback.message.edit_text(text, reply_markup=cancel_kb, parse_mode="Markdown")
     except Exception as e:
@@ -901,15 +1186,40 @@ async def admin_set_dump_channel_prompt(callback: CallbackQuery, state: FSMConte
 @router.message(AdminStates.waiting_for_dump_channel_link)
 async def admin_set_dump_channel_link(message: Message, state: FSMContext) -> None:
     try:
-        link = message.text.strip()
-        chat_id, msg_id = parse_telegram_link(link)
+        chat_id = None
+        msg_id = None
+
+        # Check if the user forwarded a message from a channel
+        if message.forward_origin:
+            if message.forward_origin.type == "channel":
+                chat_id = message.forward_origin.chat.id
+                msg_id = message.forward_origin.message_id
+                
+        # Fallback to checking normal text links
+        if not chat_id and message.text:
+            link = message.text.strip()
+            
+            # Catch invite links and instruct them properly
+            if "joinchat" in link or "+" in link:
+                await message.reply(
+                    "⚠️ **Invite Link Detected!**\n\n"
+                    "Invite links do not contain a message ID. Please **FORWARD** the first video directly from your dump channel to me instead.",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="admin_cancel")]])
+                )
+                return
+                
+            chat_id, msg_id = parse_telegram_link(link)
+            
         if not chat_id or not msg_id:
-            await message.reply("⚠️ Invalid link format. Please ensure it looks like `https://t.me/c/123456789/2`.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="admin_cancel")]]))
+            await message.reply(
+                "⚠️ Invalid format. Please either **FORWARD** a video directly from the channel, or ensure the link looks like `https://t.me/c/123456789/2`.", 
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="admin_cancel")]])
+            )
             return
         
         await state.update_data(dump_chat_id=chat_id, dump_base_msg_id=msg_id)
         await state.set_state(AdminStates.waiting_for_dump_total_videos)
-        await message.reply("✅ Link accepted.\n\nNow, please send the **TOTAL number of videos** uploaded in this channel (e.g., `300`):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="admin_cancel")]]))
+        await message.reply("✅ Channel & Base Message accepted.\n\nNow, please send the **TOTAL number of videos** uploaded in this channel (e.g., `300`):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="admin_cancel")]]))
     except Exception as e:
         logger.error(f"Error in admin_set_dump_channel_link: {e}")
 
