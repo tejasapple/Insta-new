@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import re
+import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple, Callable, Awaitable
 
@@ -13,7 +14,8 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     LinkPreviewOptions,
-    TelegramObject
+    TelegramObject,
+    BufferedInputFile
 )
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.state import State, StatesGroup
@@ -47,6 +49,7 @@ db = db_client["insta_work_bot"]
 users_col: AgnosticCollection = db["users"]
 submissions_col: AgnosticCollection = db["submissions"]
 settings_col: AgnosticCollection = db["settings"]
+dump_links_col: AgnosticCollection = db["dump_links"]  # NEW: Persistent storage for Dump Links
 
 # ==========================================
 # MULTI-ADMIN CHECK HELPER
@@ -75,7 +78,6 @@ class MaintenanceMiddleware(BaseMiddleware):
     ) -> Any:
         user = data.get("event_from_user")
         if user:
-            # Check if maintenance mode is enabled
             status_doc = await settings_col.find_one({"_id": "system_status"})
             is_maintenance = status_doc.get("maintenance_mode", False) if status_doc else False
             
@@ -86,26 +88,19 @@ class MaintenanceMiddleware(BaseMiddleware):
                         await event.answer("🛠 **Maintenance Mode ON**\n\nThe bot is currently undergoing maintenance and upgrades. Please check back later!", parse_mode="Markdown")
                     elif isinstance(event, CallbackQuery):
                         await event.answer("🛠 Maintenance Mode ON. The bot is being upgraded.", show_alert=True)
-                    return # Stop propagation, do not execute the handler
+                    return 
         
         return await handler(event, data)
 
 router = Router()
-# Register Middleware to block non-admins when Maintenance is ON
 router.message.middleware(MaintenanceMiddleware())
 router.callback_query.middleware(MaintenanceMiddleware())
-
-# ==========================================
-# IN-MEMORY STORAGE FOR DUMP LINKS
-# ==========================================
-# Links will be stored in bot memory and reset on restart (as requested)
-MEMORY_LINKS: List[str] = []
 
 # ==========================================
 # VIDEO FORWARDING HELPER
 # ==========================================
 async def forward_videos_from_link(bot: Bot, user_id: int, link: str) -> None:
-    """Extracts chat info from a Telegram link and copies 6 subsequent messages (videos)"""
+    """Extracts chat info from a Telegram link and copies (forwards) 6 subsequent messages (videos) without downloading"""
     try:
         match = re.search(r't\.me/(?:c/)?([^/]+)/(\d+)', link)
         if match:
@@ -122,7 +117,7 @@ async def forward_videos_from_link(bot: Bot, user_id: int, link: str) -> None:
                 try:
                     await bot.copy_message(chat_id=user_id, from_chat_id=chat_id, message_id=msg_id + i)
                     success_count += 1
-                    await asyncio.sleep(0.1) # Prevent FloodWait
+                    await asyncio.sleep(0.1)
                 except Exception as e:
                     logger.warning(f"Failed to copy message {msg_id + i} from {chat_id}: {e}")
             
@@ -252,7 +247,7 @@ async def register_user_if_not_exists(user_id: int, username: str, first_name: s
             "submission_count": 0,
             "join_date": datetime.now(),
             "approval_date": None,
-            "schedule_step": 0 # New track for automated links delivery
+            "schedule_step": 0 
         })
     except Exception as e:
         logger.error(f"Error registering user {user_id}: {e}")
@@ -315,16 +310,16 @@ def get_main_menu_keyboard(work_link: str, proof_link: str, is_admin: bool = Fal
         ],
         [
             InlineKeyboardButton(text="💸 Request withdrawal", callback_data="request_withdraw"),
-            InlineKeyboardButton(text="👛 My wallet", callback_data="my_balance")
+            InlineKeyboardButton(text="💰 My wallet", callback_data="my_balance")
+        ],
+        [
+            InlineKeyboardButton(text="👨‍💼 Staff Only", callback_data="staff_only_menu") 
         ],
         [
             InlineKeyboardButton(text="💼 Apply to work", url=sanitize_url(work_link))
         ],
         [
             InlineKeyboardButton(text="📢 Updates", url=sanitize_url(proof_link))
-        ],
-        [
-            InlineKeyboardButton(text="👨‍💼 Staff Only", callback_data="staff_only_menu") 
         ]
     ]
     
@@ -365,7 +360,8 @@ async def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🔗 Set Proof Link", callback_data="admin_set_proof")
             ],
             [
-                InlineKeyboardButton(text=maintenance_text, callback_data="admin_toggle_maintenance") # NEW TOGGLE BUTTON
+                InlineKeyboardButton(text="💾 Backup Database", callback_data="admin_backup"),
+                InlineKeyboardButton(text=maintenance_text, callback_data="admin_toggle_maintenance")
             ],
             [
                 InlineKeyboardButton(text="❌ Close Panel", callback_data="admin_close")
@@ -564,13 +560,13 @@ async def handle_withdraw_method(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "staff_only_menu")
 async def staff_only_menu(callback: CallbackQuery) -> None:
     try:
-        await callback.answer()
         user = await get_user(callback.from_user.id)
         
         if not user or not user.get("is_active"):
             await callback.answer("🚫 Access Denied!\n\nThis is for only our staff.", show_alert=True)
             return
             
+        await callback.answer()
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="🆕 New Work", callback_data="request_new_work"),
@@ -621,21 +617,26 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             await callback.answer(f"⏳ Next work batch is not ready yet.\n\nPlease wait {int(hours)} hours and {int(minutes)} minutes.", show_alert=True)
             return
 
-        if len(MEMORY_LINKS) < required_links:
-            await callback.answer(f"⚠️ Admin hasn't added enough links in Dump. Need {required_links}, available {len(MEMORY_LINKS)}.", show_alert=True)
+        available_links_cursor = dump_links_col.find().sort("added_at", 1).limit(required_links)
+        available_links = await available_links_cursor.to_list(length=required_links)
+
+        if len(available_links) < required_links:
+            await callback.answer(f"⚠️ Admin hasn't added enough links in Dump. Need {required_links}, available {len(available_links)}.", show_alert=True)
             return
 
         await callback.answer("📥 Processing your work batch...")
         
-        assigned_links = []
-        for _ in range(required_links):
-            assigned_links.append(MEMORY_LINKS.pop(0))
+        assigned_links = [doc["link"] for doc in available_links]
+        doc_ids = [doc["_id"] for doc in available_links]
+
+        # Delete the fetched links from DB so they are not reused
+        await dump_links_col.delete_many({"_id": {"$in": doc_ids}})
 
         await callback.message.answer(f"🚀 **New Work Assigned!**\nDelivering {required_links} batches (6 videos each)...")
         
         for link in assigned_links:
             await forward_videos_from_link(bot, callback.from_user.id, link)
-            await asyncio.sleep(1) # Gap between batches
+            await asyncio.sleep(1)
 
         await callback.message.answer("✅ **Work Delivered!**\n\nUpload 6-6 reels on both accounts and submit work.")
         
@@ -821,6 +822,7 @@ async def admin_show_stats(callback: CallbackQuery) -> None:
         active_users = await users_col.count_documents({"is_active": True})
         total_subs = await submissions_col.count_documents({})
         pending_subs = await submissions_col.count_documents({"status": "pending"})
+        links_count = await dump_links_col.count_documents({})
         
         text = (
             "📊 **Bot Statistics**\n\n"
@@ -828,25 +830,61 @@ async def admin_show_stats(callback: CallbackQuery) -> None:
             f"✅ **Active Members:** {active_users}\n"
             f"📥 **Total Submissions:** {total_subs}\n"
             f"⏳ **Unmarked (Pending) Submissions:** {pending_subs}\n"
-            f"🔗 **Available Dump Links (Memory):** {len(MEMORY_LINKS)}"
+            f"🔗 **Available Dump Links (MongoDB):** {links_count}"
         )
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]]), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in admin_stats: {e}")
 
-# --- ADD DUMP LINKS LOGIC (IN-MEMORY) ---
+# --- BACKUP SYSTEM LOGIC ---
+@router.callback_query(F.data == "admin_backup")
+async def admin_backup(callback: CallbackQuery, bot: Bot) -> None:
+    try:
+        await callback.answer("Generaing Backup...")
+        
+        users = await users_col.find({}, {"_id": 0}).to_list(length=None)
+        links = await dump_links_col.find({}, {"_id": 0}).to_list(length=None)
+        
+        # Format datetimes for JSON serialization
+        for u in users:
+            for k, v in u.items():
+                if isinstance(v, datetime):
+                    u[k] = v.isoformat()
+        
+        backup_data = {
+            "timestamp": datetime.now().isoformat(),
+            "users": users,
+            "dump_links": links,
+            "info": "This backup is for your reference. MongoDB Atlas automatically restores this data on every VPS start."
+        }
+        
+        json_data = json.dumps(backup_data, indent=4).encode('utf-8')
+        file = BufferedInputFile(json_data, filename=f"bot_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json")
+        
+        await bot.send_document(
+            callback.from_user.id, 
+            document=file, 
+            caption="💾 **Database Backup Generated!**\n\n*Note:* Since your bot uses MongoDB, data is natively persistent across all servers and VPS restarts. You don't need to manually import this file to keep things working.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Error generating backup: {e}")
+        await callback.answer("⚠️ Failed to generate backup.", show_alert=True)
+
+# --- ADD DUMP LINKS LOGIC (MONGODB) ---
 
 @router.callback_query(F.data == "admin_add_dump_links")
 async def admin_add_dump_links_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         await callback.answer()
         await state.set_state(AdminStates.waiting_for_dump_links)
+        links_count = await dump_links_col.count_documents({})
         cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
         text = (
             "📥 **Add Dump Links**\n\n"
             "Please send the Telegram message links (one per line) containing the 6-video batches.\n\n"
-            f"Currently in memory: **{len(MEMORY_LINKS)} links**\n"
-            "*(These links are stored in RAM and will vanish on bot restart to save DB storage)*"
+            f"Currently safely stored in Database: **{links_count} links**\n"
+            "*(These links are securely stored in MongoDB and will auto-fetch even if VPS restarts)*"
         )
         await callback.message.edit_text(text, reply_markup=cancel_kb, parse_mode="Markdown")
     except Exception as e:
@@ -862,9 +900,11 @@ async def admin_add_dump_links_save(message: Message, state: FSMContext) -> None
             await message.reply("⚠️ No valid Telegram links found. Try again or cancel.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="admin_cancel")]]))
             return
 
-        MEMORY_LINKS.extend(links)
+        docs = [{"link": l, "added_at": datetime.now()} for l in links]
+        await dump_links_col.insert_many(docs)
         
-        await message.reply(f"✅ Successfully added **{len(links)}** links to memory.\nTotal links available: **{len(MEMORY_LINKS)}**", reply_markup=await get_admin_panel_keyboard())
+        total_links = await dump_links_col.count_documents({})
+        await message.reply(f"✅ Successfully added **{len(links)}** links to Database.\nTotal links available: **{total_links}**", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
     except Exception as e:
         logger.error(f"Error saving dump links: {e}")
@@ -1024,7 +1064,7 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
 @router.callback_query(F.data.startswith("accept_sub_"))
 async def admin_accept_sub(callback: CallbackQuery, state: FSMContext) -> None:
     try:
-        await callback.answer("Enter balance to add.")
+        await callback.answer("Enter balance to add or skip.")
         sub_id = callback.data.split("_")[-1]
         sub = await submissions_col.find_one({"_id": ObjectId(sub_id)})
         
@@ -1037,7 +1077,7 @@ async def admin_accept_sub(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(AdminStates.waiting_for_submission_balance)
         await state.update_data(target_user_id=user_id, target_sub_id=sub_id)
         
-        prompt_text = "\n\n✅ **STATUS: ACCEPTING**\n\n👉 **Please type how much balance to add for this successful task:**"
+        prompt_text = "\n\n✅ **STATUS: ACCEPTING**\n\n👉 **Type how much balance to add, or type `/skip` to approve without asking for payment:**"
         
         if callback.message.caption:
             await callback.message.edit_caption(
@@ -1056,31 +1096,50 @@ async def admin_accept_sub(callback: CallbackQuery, state: FSMContext) -> None:
 async def process_submission_balance(message: Message, state: FSMContext, bot: Bot) -> None:
     try:
         if not message.text:
-            await message.reply("⚠️ Please enter a valid numerical amount.")
+            await message.reply("⚠️ Please enter a valid numerical amount or `/skip`.")
             return
         
-        amount = int(message.text.strip())
+        text = message.text.strip().lower()
+        amount = 0
+        is_skipped = False
+        
+        if text == "/skip":
+            is_skipped = True
+        else:
+            try:
+                amount = int(text)
+            except ValueError:
+                await message.reply("⚠️ Please enter a valid number (e.g., 500) or `/skip`.")
+                return
+                
         data = await state.get_data()
         target_id = data.get("target_user_id")
         sub_id = data.get("target_sub_id")
         
-        await message.reply(f"✅ Successfully marked as Accepted and added ₹{amount} to User `{target_id}`'s balance.", parse_mode="Markdown", reply_markup=await get_admin_panel_keyboard())
+        if is_skipped:
+            await message.reply(f"✅ Successfully marked as Accepted (Skipped Payment) for User `{target_id}`.", parse_mode="Markdown", reply_markup=await get_admin_panel_keyboard())
+        else:
+            await message.reply(f"✅ Successfully marked as Accepted and added ₹{amount} to User `{target_id}`'s balance.", parse_mode="Markdown", reply_markup=await get_admin_panel_keyboard())
+            
         await state.clear()
         
         async def accept_bg():
             if sub_id:
                 await submissions_col.update_one({"_id": ObjectId(sub_id)}, {"$set": {"status": "accepted"}})
             if target_id:
-                await users_col.update_one({"user_id": target_id}, {"$inc": {"balance": amount}})
+                if not is_skipped and amount > 0:
+                    await users_col.update_one({"user_id": target_id}, {"$inc": {"balance": amount}})
+                    notify_text = f"🎉 **Work Accepted!**\n\nYour recent work submission was approved.\n💰 **Balance Added:** ₹{amount}"
+                else:
+                    notify_text = f"🎉 **Work Accepted!**\n\nYour recent work submission was successfully approved."
+                    
                 try:
-                    await bot.send_message(target_id, f"🎉 **Work Accepted!**\n\nYour recent work submission was approved.\n💰 **Balance Added:** ₹{amount}")
+                    await bot.send_message(target_id, notify_text)
                 except Exception as e:
                     logger.error(f"Could not notify user {target_id}: {e}")
                     
         asyncio.create_task(accept_bg())
         
-    except ValueError:
-        await message.reply("⚠️ Please enter a valid number (e.g., 500).")
     except Exception as e:
         logger.error(f"Error adding sub balance: {e}")
         await state.clear()
