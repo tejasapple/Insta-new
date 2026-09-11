@@ -365,8 +365,8 @@ async def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📥 Set Dump Channel", callback_data="admin_set_dump_channel") 
             ],
             [
-                InlineKeyboardButton(text="📝 Unmarked Subs", callback_data="admin_unmarked_subs"), 
-                InlineKeyboardButton(text="✅ Marked Subs", callback_data="admin_marked_subs") 
+                InlineKeyboardButton(text="📝 Unmarked Subs", callback_data="admin_unmarked_subs_0"), 
+                InlineKeyboardButton(text="✅ Marked Subs", callback_data="admin_marked_subs_0") 
             ],
             [
                 InlineKeyboardButton(text="👥 Active Users", callback_data="admin_currently_users"),
@@ -614,13 +614,13 @@ async def handle_withdraw_method(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "staff_only_menu")
 async def staff_only_menu(callback: CallbackQuery) -> None:
     try:
+        await callback.answer()
         user = await get_user(callback.from_user.id)
         
         if not user or not user.get("is_active"):
             await callback.answer("🚫 Access Denied!\n\nThis is for only our staff.", show_alert=True)
             return
             
-        await callback.answer()
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🆕 New Work", callback_data="request_new_work")],
             [InlineKeyboardButton(text="📤 Submit Work", callback_data="submit_work")],
@@ -642,6 +642,7 @@ async def staff_only_menu(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "request_new_work")
 async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
     try:
+        await callback.answer("📥 Processing your work batch...")
         user = await get_user(callback.from_user.id)
         if not user or not user.get("is_active"):
             await callback.answer("🚫 Access Denied! This is for only our staff.", show_alert=True)
@@ -706,8 +707,6 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             await callback.answer("⚠️ Not enough new unique videos available in the Dump Channel. Please contact Admin.", show_alert=True)
             return
 
-        await callback.answer("📥 Processing your work batch...")
-        
         if step == 0:
             await callback.message.answer("🚀 **First Batch Assigned!**\nDelivering your first 6 videos...")
         else:
@@ -826,7 +825,7 @@ async def process_work_photo(message: Message, state: FSMContext) -> None:
         photo_id = message.photo[-1].file_id
         await state.update_data(photo_id=photo_id)
         await state.set_state(WorkSubmission.waiting_for_views)
-        await message.reply("✅ Photo received!\n\nNow, please send the **Channels View** (e.g., 6-6 reel).")
+        await message.reply("✅ Photo received!\n\nNow, please send the **Channels View** (e.g., 6-6 web ke screenshot dalo).")
     except Exception as e:
         logger.error(f"Error in process_work_photo: {e}")
 
@@ -1446,12 +1445,16 @@ async def admin_set_dump_total_videos(message: Message, state: FSMContext) -> No
         logger.error(f"Error in admin_set_dump_total_videos: {e}")
 
 
-# --- UNMARKED & MARKED SUBMISSIONS LOGIC ---
+# --- PAGINATED UNMARKED & MARKED SUBMISSIONS LOGIC ---
 
-@router.callback_query(F.data == "admin_unmarked_subs")
+@router.callback_query(F.data.startswith("admin_unmarked_subs_"))
 async def admin_unmarked_subs(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
+        page = int(callback.data.split("_")[-1])
+        ITEMS_PER_PAGE = 10
+        skip_count = page * ITEMS_PER_PAGE
+        
         pipeline = [
             {"$match": {"status": "pending"}},
             {"$sort": {"timestamp": -1}}, 
@@ -1461,12 +1464,24 @@ async def admin_unmarked_subs(callback: CallbackQuery) -> None:
                 "count": {"$sum": 1},
                 "latest": {"$first": "$timestamp"}
             }},
-            {"$sort": {"latest": -1}}
+            {"$sort": {"latest": -1}},
+            {"$skip": skip_count},
+            {"$limit": ITEMS_PER_PAGE}
         ]
-        subs_cursor = submissions_col.aggregate(pipeline)
-        grouped_subs = await subs_cursor.to_list(length=50)
         
-        if not grouped_subs:
+        # Determine total users for pagination buttons
+        total_pipeline = [
+            {"$match": {"status": "pending"}},
+            {"$group": {"_id": "$user_id"}}
+        ]
+        total_users_cursor = submissions_col.aggregate(total_pipeline)
+        total_users_list = await total_users_cursor.to_list(length=None)
+        total_users = len(total_users_list)
+
+        subs_cursor = submissions_col.aggregate(pipeline)
+        grouped_subs = await subs_cursor.to_list(length=ITEMS_PER_PAGE)
+        
+        if not grouped_subs and page == 0:
             await callback.answer("✅ No Unmarked (Pending) work submissions.", show_alert=True)
             return
             
@@ -1474,20 +1489,33 @@ async def admin_unmarked_subs(callback: CallbackQuery) -> None:
         for s in grouped_subs:
             kb.button(text=f"📄 {s['user_name']} ({s['count']} unmarked)", callback_data=f"view_unmarked_{s['_id']}")
         
-        kb.button(text="« Back", callback_data="admin_cancel")
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️ Preview", callback_data=f"admin_unmarked_subs_{page-1}"))
+        if skip_count + ITEMS_PER_PAGE < total_users:
+            nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"admin_unmarked_subs_{page+1}"))
+        
+        if nav_row:
+            kb.row(*nav_row)
+            
+        kb.row(InlineKeyboardButton(text="« Back", callback_data="admin_cancel"))
         kb.adjust(1)
         
         try:
-            await callback.message.edit_text("📋 **Unmarked Work Submissions (Newest First):**\nClick on a user to review their work:", reply_markup=kb.as_markup(), parse_mode="Markdown")
+            await callback.message.edit_text(f"📋 **Unmarked Work Submissions (Page {page+1}):**\nClick on a user to review their work:", reply_markup=kb.as_markup(), parse_mode="Markdown")
         except TelegramBadRequest:
             pass
     except Exception as e:
         logger.error(f"Error in admin_unmarked_subs: {e}")
 
-@router.callback_query(F.data == "admin_marked_subs")
+@router.callback_query(F.data.startswith("admin_marked_subs_"))
 async def admin_marked_subs(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
+        page = int(callback.data.split("_")[-1])
+        ITEMS_PER_PAGE = 10
+        skip_count = page * ITEMS_PER_PAGE
+        
         pipeline = [
             {"$match": {"status": {"$in": ["accepted", "denied"]}}},
             {"$sort": {"timestamp": -1}}, 
@@ -1497,12 +1525,23 @@ async def admin_marked_subs(callback: CallbackQuery) -> None:
                 "count": {"$sum": 1},
                 "latest": {"$first": "$timestamp"}
             }},
-            {"$sort": {"latest": -1}}
+            {"$sort": {"latest": -1}},
+            {"$skip": skip_count},
+            {"$limit": ITEMS_PER_PAGE}
         ]
+
+        total_pipeline = [
+            {"$match": {"status": {"$in": ["accepted", "denied"]}}},
+            {"$group": {"_id": "$user_id"}}
+        ]
+        total_users_cursor = submissions_col.aggregate(total_pipeline)
+        total_users_list = await total_users_cursor.to_list(length=None)
+        total_users = len(total_users_list)
+
         subs_cursor = submissions_col.aggregate(pipeline)
-        grouped_subs = await subs_cursor.to_list(length=50)
+        grouped_subs = await subs_cursor.to_list(length=ITEMS_PER_PAGE)
         
-        if not grouped_subs:
+        if not grouped_subs and page == 0:
             await callback.answer("✅ No Marked work submissions found.", show_alert=True)
             return
             
@@ -1510,11 +1549,20 @@ async def admin_marked_subs(callback: CallbackQuery) -> None:
         for s in grouped_subs:
             kb.button(text=f"📁 {s['user_name']} ({s['count']} marked)", callback_data=f"view_marked_{s['_id']}")
         
-        kb.button(text="« Back", callback_data="admin_cancel")
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️ Preview", callback_data=f"admin_marked_subs_{page-1}"))
+        if skip_count + ITEMS_PER_PAGE < total_users:
+            nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"admin_marked_subs_{page+1}"))
+        
+        if nav_row:
+            kb.row(*nav_row)
+            
+        kb.row(InlineKeyboardButton(text="« Back", callback_data="admin_cancel"))
         kb.adjust(1)
         
         try:
-            await callback.message.edit_text("📁 **Marked Work Submissions (History):**\nClick on a user to view their processed history:", reply_markup=kb.as_markup(), parse_mode="Markdown")
+            await callback.message.edit_text(f"📁 **Marked Work Submissions (History Page {page+1}):**\nClick on a user to view their processed history:", reply_markup=kb.as_markup(), parse_mode="Markdown")
         except TelegramBadRequest:
             pass
     except Exception as e:
@@ -1523,16 +1571,21 @@ async def admin_marked_subs(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("view_unmarked_"))
 async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
     try:
-        await callback.answer() # API Limit fix
+        await callback.answer() # Immediate answer to avoid API lock
         user_id = int(callback.data.split("_")[-1])
         sub = await submissions_col.find_one({"user_id": user_id, "status": "pending"}, sort=[("timestamp", -1)])
         if not sub:
             await callback.answer("⚠️ No more unmarked submissions for this user.", show_alert=True)
             return
         
-        l1 = sub.get('link1', sub.get('link', 'N/A'))
-        l2 = sub.get('link2', 'N/A')
-        v = sub.get('views', 'N/A')
+        l1 = str(sub.get('link1', sub.get('link', 'N/A')))
+        l2 = str(sub.get('link2', 'N/A'))
+        v = str(sub.get('views', 'N/A'))
+        
+        # TRUNCATE HUGE TEXT TO PREVENT CAPTION/API LIMIT ERROR (1024 char limit)
+        if len(l1) > 200: l1 = l1[:197] + "..."
+        if len(l2) > 200: l2 = l2[:197] + "..."
+        if len(v) > 200: v = v[:197] + "..."
         
         caption_text = (
             f"👤 **User:** {sub.get('user_name')}\n"
@@ -1553,7 +1606,7 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
             [
                 InlineKeyboardButton(text="❌ Deny", callback_data=f"deny_sub_{sub_id}")
             ],
-            [InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs")]
+            [InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs_0")]
         ])
         
         photo_id = sub.get("photo_id")
@@ -1591,17 +1644,24 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
             
         status = "✅ ACCEPTED" if sub.get("status") == "accepted" else "❌ DENIED"
         
+        l1 = str(sub.get('link1', sub.get('link', 'N/A')))
+        l2 = str(sub.get('link2', 'N/A'))
+        
+        # TRUNCATE FOR API LIMIT
+        if len(l1) > 200: l1 = l1[:197] + "..."
+        if len(l2) > 200: l2 = l2[:197] + "..."
+        
         caption_text = (
             f"👤 **User:** {sub.get('user_name')}\n"
             f"🆔 **ID:** `{sub.get('user_id')}`\n"
             f"📌 **Status:** {status}\n"
-            f"🔗 **Channel 1:** {sub.get('link1', 'N/A')}\n"
-            f"🔗 **Channel 2:** {sub.get('link2', 'N/A')}\n"
+            f"🔗 **Channel 1:** {l1}\n"
+            f"🔗 **Channel 2:** {l2}\n"
             f"🕒 **Time:** {sub.get('timestamp').strftime('%d %b, %I:%M %p')}\n"
         )
         
         action_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="« Back to Marked", callback_data="admin_marked_subs")]
+            [InlineKeyboardButton(text="« Back to Marked", callback_data="admin_marked_subs_0")]
         ])
         
         photo_id = sub.get("photo_id")
@@ -1616,6 +1676,7 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
         logger.error(f"Error opening marked submission: {e}")
 
 # UPGRADE: Added "work_approved" setting so user can proceed to next step
+# BUTTON SPEED FIX: Moving DB save to background task
 @router.callback_query(F.data.startswith("skip_sub_"))
 async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
     try:
@@ -1629,24 +1690,24 @@ async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
             
         user_id = sub["user_id"]
         
-        await submissions_col.update_one({"_id": ObjectId(sub_id)}, {"$set": {"status": "accepted"}})
-        
-        # Approve work status
-        await users_col.update_one({"user_id": user_id}, {"$set": {"work_approved": True}})
-        
-        try:
-            await bot.send_message(user_id, "🎉 **Work Accepted!**\n\nYour recent work submission was successfully approved (No Balance Added). You can now request your next batch.")
-        except Exception:
-            pass
-            
         success_text = f"✅ Sub ID `{sub_id}` marked as Accepted (Skipped Payment) for User `{user_id}`."
         try:
             if callback.message.caption:
-                await callback.message.edit_caption(caption=callback.message.caption + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs")]]))
+                await callback.message.edit_caption(caption=callback.message.caption + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs_0")]]))
             else:
-                await callback.message.edit_text(text=callback.message.text + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs")]]))
+                await callback.message.edit_text(text=callback.message.text + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs_0")]]))
         except TelegramBadRequest:
             pass
+
+        async def skip_bg():
+            await submissions_col.update_one({"_id": ObjectId(sub_id)}, {"$set": {"status": "accepted"}})
+            await users_col.update_one({"user_id": user_id}, {"$set": {"work_approved": True}})
+            try:
+                await bot.send_message(user_id, "🎉 **Work Accepted!**\n\nYour recent work submission was successfully approved (No Balance Added). You can now request your next batch.")
+            except Exception:
+                pass
+                
+        asyncio.create_task(skip_bg())
 
     except Exception as e:
         logger.error(f"Error in skip_sub: {e}")
@@ -1787,7 +1848,7 @@ async def process_deny_reason(message: Message, state: FSMContext, bot: Bot) -> 
         await state.clear()
 
 
-# --- UPGRADE: GIVE SECOND BATCH LOGIC ---
+# --- UPGRADE: GIVE SECOND BATCH LOGIC (BACKGROUND FAST) ---
 @router.callback_query(F.data.startswith("give_second_batch_"))
 async def admin_give_second_batch(callback: CallbackQuery, bot: Bot) -> None:
     try:
@@ -1816,46 +1877,49 @@ async def admin_give_second_batch(callback: CallbackQuery, bot: Bot) -> None:
             return
 
         await callback.answer("📤 Sending Second Batch to user...")
-        batch_idx = random.choice(available_batches)
-        start_msg_id = base_msg_id + (batch_idx * 6)
-        
-        try:
-            await bot.send_message(user_id, "🚀 **Second Batch Approved!**\n\nAdmin has approved your first batch. Delivering your second batch (6 videos) now...")
-        except Exception:
-            pass
-            
-        success_count = 0
-        for i in range(6):
-            try:
-                await bot.copy_message(
-                    chat_id=user_id,
-                    from_chat_id=chat_id,
-                    message_id=start_msg_id + i
-                )
-                success_count += 1
-                await asyncio.sleep(0.3)
-            except Exception as e:
-                logger.warning(f"Failed to copy msg {start_msg_id + i} to {user_id}: {e}")
-
-        sent_batches.append(batch_idx)
-        
-        # Step incremented, pending removed, timer restarted, work_approved=True so they can ask next directly
-        await users_col.update_one(
-            {"user_id": user_id},
-            {"$set": {
-                "pending_second_batch": False,
-                "schedule_step": 1,
-                "last_work_time": datetime.now(),
-                "work_approved": True,
-                "sent_batches": sent_batches
-            }}
-        )
         
         try:
             new_text = callback.message.text + "\n\n✅ **GIVEN SECOND BATCH**"
             await callback.message.edit_text(new_text, reply_markup=None)
         except TelegramBadRequest:
             pass
+
+        async def give_batch_bg():
+            batch_idx = random.choice(available_batches)
+            start_msg_id = base_msg_id + (batch_idx * 6)
+            
+            try:
+                await bot.send_message(user_id, "🚀 **Second Batch Approved!**\n\nAdmin has approved your first batch. Delivering your second batch (6 videos) now...")
+            except Exception:
+                pass
+                
+            success_count = 0
+            for i in range(6):
+                try:
+                    await bot.copy_message(
+                        chat_id=user_id,
+                        from_chat_id=chat_id,
+                        message_id=start_msg_id + i
+                    )
+                    success_count += 1
+                    await asyncio.sleep(0.3)
+                except Exception as e:
+                    logger.warning(f"Failed to copy msg {start_msg_id + i} to {user_id}: {e}")
+
+            sent_batches.append(batch_idx)
+            
+            await users_col.update_one(
+                {"user_id": user_id},
+                {"$set": {
+                    "pending_second_batch": False,
+                    "schedule_step": 1,
+                    "last_work_time": datetime.now(),
+                    "work_approved": True,
+                    "sent_batches": sent_batches
+                }}
+            )
+            
+        asyncio.create_task(give_batch_bg())
             
     except Exception as e:
         logger.error(f"Error giving second batch: {e}")
