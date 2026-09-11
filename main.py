@@ -49,6 +49,7 @@ db = db_client["insta_work_bot"]
 users_col: AgnosticCollection = db["users"]
 submissions_col: AgnosticCollection = db["submissions"]
 settings_col: AgnosticCollection = db["settings"]
+dp_texts_col: AgnosticCollection = db["dp_texts"]  # NEW: MongoDB text storage for DP
 
 # ==========================================
 # LOCAL MEDIA STORAGE (NOT IN MONGO)
@@ -297,7 +298,6 @@ class AdminStates(StatesGroup):
     waiting_for_broadcast_msg = State()
     waiting_for_dump_channel_link = State() 
     waiting_for_dump_total_videos = State()
-    # New States for Local Media System
     waiting_for_dp_storage_media = State()
     waiting_for_dp_bank_media = State()
 
@@ -489,7 +489,6 @@ async def show_balance(callback: CallbackQuery) -> None:
         await callback.answer()
         user = await get_user(callback.from_user.id)
         
-        # New Logic: Professional denial for normal/inactive users
         if not user or not user.get("is_active"):
             text = (
                 "🚫 **Access Restricted**\n\n"
@@ -625,21 +624,25 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         now = datetime.now()
         is_admin = await is_admin_user(callback.from_user.id)
         
-        # Step timing logic
+        # New Step timing logic as per requirements
         if step == 0:
             next_allowed = None
             required_batches = 2
+            wait_hours = 4
         elif step == 1:
             next_allowed = last_work_time + timedelta(hours=4)
             required_batches = 4
+            wait_hours = 6
         elif step == 2:
             next_allowed = last_work_time + timedelta(hours=6)
             required_batches = 4
+            wait_hours = 8
         else:
             next_allowed = last_work_time + timedelta(hours=8)
             required_batches = 4
+            wait_hours = 8
 
-        # Admin Bypass logic
+        # Timing Bypass or enforcement
         if next_allowed and now < next_allowed:
             if is_admin:
                 await callback.answer("🛠️ Admin Bypass: Timer ignored for testing.", show_alert=False)
@@ -647,7 +650,7 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
                 wait_time = next_allowed - now
                 hours, remainder = divmod(wait_time.total_seconds(), 3600)
                 minutes = remainder // 60
-                await callback.answer(f"⏳ Next batch is locked.\n\nPlease wait {int(hours)} hours and {int(minutes)} minutes.", show_alert=True)
+                await callback.answer(f"⏳ Please try again after {int(hours)} hours and {int(minutes)} minutes.", show_alert=True)
                 return
 
         # Fetch dump settings
@@ -703,7 +706,7 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             }, "$inc": {"schedule_step": 1}}
         )
 
-        await callback.message.answer("✅ **Work Delivered!**\n\nUpload 6-6 reels on both accounts and submit work.")
+        await callback.message.answer("✅ **Work Delivered!**\n\nUpload on Instagram account, 6 videos each account, and submit work.")
 
     except Exception as e:
         logger.error(f"Error in request_new_work: {e}")
@@ -815,7 +818,6 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.edit_text(text, reply_markup=get_main_menu_keyboard(settings["work_link"], settings["proof_link"], is_admin))
     except Exception as e:
         logger.error(f"Error in back_to_menu: {e}")
-
 # ==========================================
 # ADMIN PANEL (FULL CONTROL LOGIC)
 # ==========================================
@@ -878,6 +880,11 @@ async def admin_show_stats(callback: CallbackQuery) -> None:
         await callback.answer()
         total_users = await users_col.count_documents({})
         active_users = await users_col.count_documents({"is_active": True})
+        
+        # Joined Today Calculation
+        today_start = datetime.combine(datetime.now().date(), datetime.min.time())
+        joined_today = await users_col.count_documents({"join_date": {"$gte": today_start}})
+        
         total_subs = await submissions_col.count_documents({})
         pending_subs = await submissions_col.count_documents({"status": "pending"})
         
@@ -888,7 +895,8 @@ async def admin_show_stats(callback: CallbackQuery) -> None:
         text = (
             "📊 **Bot Statistics**\n\n"
             f"👥 **Total Users:** {total_users}\n"
-            f"✅ **Active Members:** {active_users}\n"
+            f"✅ **Total Active Members:** {active_users}\n"
+            f"🆕 **Joined Today:** {joined_today}\n\n"
             f"📥 **Total Submissions:** {total_subs}\n"
             f"⏳ **Unmarked (Pending) Submissions:** {pending_subs}\n"
             f"🔗 **Available Dump Batches:** {batches} ({total_videos} videos)"
@@ -901,12 +909,11 @@ async def admin_show_stats(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "admin_backup")
 async def admin_backup(callback: CallbackQuery, bot: Bot) -> None:
     try:
-        await callback.answer("Generaing Backup...")
+        await callback.answer("Generating Backup...")
         
         users = await users_col.find({}, {"_id": 0}).to_list(length=None)
         dump_settings = await settings_col.find_one({"_id": "dump_settings"}, {"_id": 0})
         
-        # Format datetimes for JSON serialization
         for u in users:
             for k, v in u.items():
                 if isinstance(v, datetime):
@@ -916,7 +923,7 @@ async def admin_backup(callback: CallbackQuery, bot: Bot) -> None:
             "timestamp": datetime.now().isoformat(),
             "users": users,
             "dump_settings": dump_settings,
-            "info": "This backup is for your reference. MongoDB Atlas automatically restores this data on every VPS start."
+            "info": "MongoDB Auto-Sync is ON. Local file is just for reference."
         }
         
         json_data = json.dumps(backup_data, indent=4).encode('utf-8')
@@ -925,14 +932,14 @@ async def admin_backup(callback: CallbackQuery, bot: Bot) -> None:
         await bot.send_document(
             callback.from_user.id, 
             document=file, 
-            caption="💾 **Database Backup Generated!**\n\n*Note:* Since your bot uses MongoDB, data is natively persistent across all servers and VPS restarts. You don't need to manually import this file to keep things working.",
+            caption="💾 **Database Backup Generated!**\n\n*Note:* Since your bot uses MongoDB, data is natively persistent.",
             parse_mode="Markdown"
         )
     except Exception as e:
         logger.error(f"Error generating backup: {e}")
         await callback.answer("⚠️ Failed to generate backup.", show_alert=True)
 
-# --- DP STORAGE & DP BANK (LOCAL JSON) ---
+# --- DP STORAGE (JSON + MONGODB TEXT) ---
 
 @router.callback_query(F.data == "admin_dp_storage_menu")
 async def dp_storage_menu(callback: CallbackQuery) -> None:
@@ -943,7 +950,7 @@ async def dp_storage_menu(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="📁 Step 3", callback_data="dp_view_step3"), InlineKeyboardButton(text="📁 Step 4", callback_data="dp_view_step4")],
             [InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]
         ])
-        await callback.message.edit_text("🖼️ **DP Storage (Steps)**\n\nLocal storage for your media. Select a step to view or add items:", reply_markup=kb)
+        await callback.message.edit_text("🖼️ **DP Storage (Steps)**\n\nLocal storage for Media + MongoDB for Texts. Select a step:", reply_markup=kb)
     except Exception as e:
         logger.error(f"Error in dp_storage_menu: {e}")
 
@@ -952,12 +959,16 @@ async def view_dp_step(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         await callback.answer()
         step = callback.data.split("_")[-1]
-        media_data = load_media()
-        items = media_data.get("dp_storage", {}).get(step, [])
         
-        text = f"📁 **{step.capitalize()} Storage**\nTotal Items: `{len(items)}`\n\nWhat would you like to do?"
+        media_data = load_media()
+        media_items = media_data.get("dp_storage", {}).get(step, [])
+        text_items = await dp_texts_col.count_documents({"step": step})
+        
+        total_items = len(media_items) + text_items
+        
+        text = f"📁 **{step.capitalize()} Storage**\nTotal Items: `{total_items}` (Media: {len(media_items)}, Texts: {text_items})\n\nWhat would you like to do?"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Add Media", callback_data=f"dp_add_{step}"), InlineKeyboardButton(text="👁️ View All", callback_data=f"dp_show_{step}")],
+            [InlineKeyboardButton(text="➕ Add", callback_data=f"dp_add_{step}"), InlineKeyboardButton(text="👁️ View All", callback_data=f"dp_show_{step}_0")],
             [InlineKeyboardButton(text="🗑️ Clear Step", callback_data=f"dp_clear_{step}")],
             [InlineKeyboardButton(text="« Back", callback_data="admin_dp_storage_menu")]
         ])
@@ -974,7 +985,12 @@ async def add_dp_step_media(callback: CallbackQuery, state: FSMContext) -> None:
         await state.update_data(dp_step=step)
         
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data=f"dp_view_{step}")]])
-        await callback.message.edit_text(f"📤 **Adding to {step.capitalize()}**\n\nPlease send a Photo, Video, or Text message to store it locally:", reply_markup=kb)
+        await callback.message.edit_text(
+            f"📤 **Adding to {step.capitalize()}**\n\n"
+            f"👉 Please send a Photo, Video, or Text message.\n"
+            f"*(Note: Texts and links will be saved in MongoDB. Photos and Videos will be saved on Local Server)*", 
+            reply_markup=kb
+        )
     except Exception as e:
         logger.error(f"Error in add_dp_step_media: {e}")
 
@@ -986,6 +1002,7 @@ async def receive_dp_storage_media(message: Message, state: FSMContext) -> None:
         if not step:
             return
 
+        is_text = False
         file_id = None
         media_type = None
 
@@ -998,34 +1015,61 @@ async def receive_dp_storage_media(message: Message, state: FSMContext) -> None:
         elif message.text:
             file_id = message.text
             media_type = "text"
+            is_text = True
 
         if not file_id:
             await message.reply("⚠️ Unsupported format. Please send a Photo, Video, or Text.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"dp_view_{step}")]]))
             return
 
-        media_data = load_media()
-        media_data["dp_storage"][step].append({"type": media_type, "content": file_id})
-        save_media(media_data)
+        if is_text:
+            # TEXT -> MONGODB
+            await dp_texts_col.insert_one({
+                "step": step,
+                "text": file_id,
+                "timestamp": datetime.now()
+            })
+            save_msg = f"✅ Text saved to MongoDB under **{step.capitalize()}**!"
+        else:
+            # MEDIA -> LOCAL JSON
+            media_data = load_media()
+            media_data["dp_storage"][step].append({"type": media_type, "content": file_id})
+            save_media(media_data)
+            save_msg = f"✅ Media saved locally under **{step.capitalize()}**!"
 
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Step Menu", callback_data=f"dp_view_{step}")]])
-        await message.reply(f"✅ Item saved to **{step.capitalize()}**!\n\nYou can keep sending more media to save, or go back.", reply_markup=kb)
+        await message.reply(f"{save_msg}\n\nYou can keep sending more data to save, or go back.", reply_markup=kb)
     except Exception as e:
         logger.error(f"Error in receive_dp_storage_media: {e}")
 
+# API LIMIT PREVENTED: PAGINATION ADDED
 @router.callback_query(F.data.startswith("dp_show_"))
-async def show_dp_step_media(callback: CallbackQuery, bot: Bot) -> None:
+async def show_dp_step_media_paginated(callback: CallbackQuery, bot: Bot) -> None:
     try:
         await callback.answer()
-        step = callback.data.split("_")[-1]
-        media_data = load_media()
-        items = media_data.get("dp_storage", {}).get(step, [])
+        parts = callback.data.split("_")
+        step = parts[2]
+        page = int(parts[3]) if len(parts) > 3 else 0
         
-        if not items:
+        media_data = load_media()
+        media_items = media_data.get("dp_storage", {}).get(step, [])
+        text_docs = await dp_texts_col.find({"step": step}).sort("timestamp", 1).to_list(length=None)
+        
+        combined_items = media_items + [{"type": "text", "content": doc["text"]} for doc in text_docs]
+        
+        if not combined_items:
             await callback.message.answer(f"⚠️ **{step.capitalize()} is empty.**", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"dp_view_{step}")]]))
             return
-            
-        await callback.message.answer(f"📂 **Showing all items in {step.capitalize()} ({len(items)} items):**")
-        for item in items:
+
+        ITEMS_PER_PAGE = 5
+        total_items = len(combined_items)
+        start_idx = page * ITEMS_PER_PAGE
+        end_idx = start_idx + ITEMS_PER_PAGE
+        
+        page_items = combined_items[start_idx:end_idx]
+        
+        await callback.message.answer(f"📂 **{step.capitalize()} (Page {page+1})** - Showing {len(page_items)} items:")
+        
+        for item in page_items:
             m_type = item["type"]
             content = item["content"]
             try:
@@ -1034,25 +1078,45 @@ async def show_dp_step_media(callback: CallbackQuery, bot: Bot) -> None:
                 elif m_type == "video":
                     await bot.send_video(callback.from_user.id, video=content)
                 elif m_type == "text":
-                    await bot.send_message(callback.from_user.id, text=content)
+                    await bot.send_message(callback.from_user.id, text=content, disable_web_page_preview=True)
             except Exception as ex:
                 logger.warning(f"Failed to send {m_type} from storage: {ex}")
             await asyncio.sleep(0.3)
             
+        # Pagination Menu
+        nav_kb = InlineKeyboardBuilder()
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️ Preview", callback_data=f"dp_show_{step}_{page-1}"))
+        if end_idx < total_items:
+            nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"dp_show_{step}_{page+1}"))
+            
+        if nav_row:
+            nav_kb.row(*nav_row)
+        nav_kb.row(InlineKeyboardButton(text="« Back to Step Menu", callback_data=f"dp_view_{step}"))
+        
+        await callback.message.answer(f"Navigation for {step.capitalize()}:", reply_markup=nav_kb.as_markup())
+            
     except Exception as e:
-        logger.error(f"Error in show_dp_step_media: {e}")
+        logger.error(f"Error in show_dp_step_media_paginated: {e}")
 
 @router.callback_query(F.data.startswith("dp_clear_"))
 async def clear_dp_step(callback: CallbackQuery) -> None:
     try:
         step = callback.data.split("_")[-1]
+        
+        # Clear Local
         media_data = load_media()
         media_data["dp_storage"][step] = []
         save_media(media_data)
-        await callback.answer(f"✅ {step.capitalize()} cleared successfully!", show_alert=True)
+        
+        # Clear MongoDB Texts
+        await dp_texts_col.delete_many({"step": step})
+        
+        await callback.answer(f"✅ {step.capitalize()} cleared successfully (Local + MongoDB)!", show_alert=True)
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Add Media", callback_data=f"dp_add_{step}"), InlineKeyboardButton(text="👁️ View All", callback_data=f"dp_show_{step}")],
+            [InlineKeyboardButton(text="➕ Add", callback_data=f"dp_add_{step}"), InlineKeyboardButton(text="👁️ View All", callback_data=f"dp_show_{step}_0")],
             [InlineKeyboardButton(text="🗑️ Clear Step", callback_data=f"dp_clear_{step}")],
             [InlineKeyboardButton(text="« Back", callback_data="admin_dp_storage_menu")]
         ])
@@ -1060,7 +1124,7 @@ async def clear_dp_step(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error(f"Error in clear_dp_step: {e}")
 
-# --- DP BANK MENUS ---
+# --- DP BANK MENUS (PAGINATED) ---
 
 @router.callback_query(F.data == "admin_dp_bank_menu")
 async def dp_bank_menu(callback: CallbackQuery) -> None:
@@ -1072,7 +1136,7 @@ async def dp_bank_menu(callback: CallbackQuery) -> None:
         text = f"🏦 **DP Bank**\nTotal Photos: `{len(items)}`\n\nManage your massive collection of DPs:"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="➕ Add Photo", callback_data="dpbank_add")],
-            [InlineKeyboardButton(text="🎲 Random 1", callback_data="dpbank_random"), InlineKeyboardButton(text="👁️ View All", callback_data="dpbank_viewall")],
+            [InlineKeyboardButton(text="🎲 Random 1", callback_data="dpbank_random"), InlineKeyboardButton(text="👁️ View All", callback_data="dpbank_viewall_0")],
             [InlineKeyboardButton(text="🗑️ Clear Bank", callback_data="dpbank_clear")],
             [InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]
         ])
@@ -1124,10 +1188,14 @@ async def show_dpbank_random(callback: CallbackQuery, bot: Bot) -> None:
     except Exception as e:
         logger.error(f"Error in show_dpbank_random: {e}")
 
-@router.callback_query(F.data == "dpbank_viewall")
-async def show_dpbank_all(callback: CallbackQuery, bot: Bot) -> None:
+# API LIMIT PREVENTED: PAGINATION ADDED
+@router.callback_query(F.data.startswith("dpbank_viewall_"))
+async def show_dpbank_all_paginated(callback: CallbackQuery, bot: Bot) -> None:
     try:
         await callback.answer()
+        parts = callback.data.split("_")
+        page = int(parts[2]) if len(parts) > 2 else 0
+        
         media_data = load_media()
         items = media_data.get("dp_bank", [])
         
@@ -1135,13 +1203,33 @@ async def show_dpbank_all(callback: CallbackQuery, bot: Bot) -> None:
             await callback.message.answer("⚠️ DP Bank is empty.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_dp_bank_menu")]]))
             return
             
-        await callback.message.answer(f"🏦 **Showing all {len(items)} photos in DP Bank:**")
-        for photo_id in items:
+        ITEMS_PER_PAGE = 5
+        total_items = len(items)
+        start_idx = page * ITEMS_PER_PAGE
+        end_idx = start_idx + ITEMS_PER_PAGE
+        
+        page_items = items[start_idx:end_idx]
+        await callback.message.answer(f"🏦 **DP Bank (Page {page+1})** - Showing {len(page_items)} photos:")
+        
+        for photo_id in page_items:
             try:
                 await bot.send_photo(callback.from_user.id, photo=photo_id)
             except Exception as ex:
                 logger.warning(f"Failed to send bank photo: {ex}")
             await asyncio.sleep(0.3)
+            
+        nav_kb = InlineKeyboardBuilder()
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️ Preview", callback_data=f"dpbank_viewall_{page-1}"))
+        if end_idx < total_items:
+            nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"dpbank_viewall_{page+1}"))
+            
+        if nav_row:
+            nav_kb.row(*nav_row)
+        nav_kb.row(InlineKeyboardButton(text="« Back to Bank Menu", callback_data="admin_dp_bank_menu"))
+        
+        await callback.message.answer("Navigation:", reply_markup=nav_kb.as_markup())
             
     except Exception as e:
         logger.error(f"Error in show_dpbank_all: {e}")
@@ -1156,7 +1244,7 @@ async def clear_dpbank(callback: CallbackQuery) -> None:
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="➕ Add Photo", callback_data="dpbank_add")],
-            [InlineKeyboardButton(text="🎲 Random 1", callback_data="dpbank_random"), InlineKeyboardButton(text="👁️ View All", callback_data="dpbank_viewall")],
+            [InlineKeyboardButton(text="🎲 Random 1", callback_data="dpbank_random"), InlineKeyboardButton(text="👁️ View All", callback_data="dpbank_viewall_0")],
             [InlineKeyboardButton(text="🗑️ Clear Bank", callback_data="dpbank_clear")],
             [InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]
         ])
@@ -1165,7 +1253,7 @@ async def clear_dpbank(callback: CallbackQuery) -> None:
         logger.error(f"Error in clear_dpbank: {e}")
 
 
-# --- SINGLE DUMP CHANNEL LOGIC (UPDATED WITH FORWARD FIX) ---
+# --- SINGLE DUMP CHANNEL LOGIC ---
 
 @router.callback_query(F.data == "admin_set_dump_channel")
 async def admin_set_dump_channel_prompt(callback: CallbackQuery, state: FSMContext) -> None:
@@ -1189,17 +1277,14 @@ async def admin_set_dump_channel_link(message: Message, state: FSMContext) -> No
         chat_id = None
         msg_id = None
 
-        # Check if the user forwarded a message from a channel
         if message.forward_origin:
             if message.forward_origin.type == "channel":
                 chat_id = message.forward_origin.chat.id
                 msg_id = message.forward_origin.message_id
                 
-        # Fallback to checking normal text links
         if not chat_id and message.text:
             link = message.text.strip()
             
-            # Catch invite links and instruct them properly
             if "joinchat" in link or "+" in link:
                 await message.reply(
                     "⚠️ **Invite Link Detected!**\n\n"
@@ -1352,10 +1437,15 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
         )
         
         sub_id = str(sub["_id"])
+        
+        # ADDED: SKIP PAYMENT BUTTON
         action_kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Accept & Mark", callback_data=f"accept_sub_{sub_id}"),
-                InlineKeyboardButton(text="❌ Deny & Mark", callback_data=f"deny_sub_{sub_id}")
+                InlineKeyboardButton(text="✅ Accept", callback_data=f"accept_sub_{sub_id}"),
+                InlineKeyboardButton(text="⏭️ Skip Payment", callback_data=f"skip_sub_{sub_id}")
+            ],
+            [
+                InlineKeyboardButton(text="❌ Deny", callback_data=f"deny_sub_{sub_id}")
             ],
             [InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs")]
         ])
@@ -1412,10 +1502,40 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
     except Exception as e:
         logger.error(f"Error opening marked submission: {e}")
 
+# ADDED: SKIP SUB LOGIC 
+@router.callback_query(F.data.startswith("skip_sub_"))
+async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
+    try:
+        await callback.answer("Skipping payment...")
+        sub_id = callback.data.split("_")[-1]
+        sub = await submissions_col.find_one({"_id": ObjectId(sub_id)})
+        
+        if not sub or sub.get("status") != "pending":
+            await callback.answer("Submission already processed.", show_alert=True)
+            return
+            
+        user_id = sub["user_id"]
+        
+        await submissions_col.update_one({"_id": ObjectId(sub_id)}, {"$set": {"status": "accepted"}})
+        
+        try:
+            await bot.send_message(user_id, "🎉 **Work Accepted!**\n\nYour recent work submission was successfully approved (No Balance Added).")
+        except Exception:
+            pass
+            
+        success_text = f"✅ Sub ID `{sub_id}` marked as Accepted (Skipped Payment) for User `{user_id}`."
+        if callback.message.caption:
+            await callback.message.edit_caption(caption=callback.message.caption + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs")]]))
+        else:
+            await callback.message.edit_text(text=callback.message.text + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs")]]))
+
+    except Exception as e:
+        logger.error(f"Error in skip_sub: {e}")
+
 @router.callback_query(F.data.startswith("accept_sub_"))
 async def admin_accept_sub(callback: CallbackQuery, state: FSMContext) -> None:
     try:
-        await callback.answer("Enter balance to add or skip.")
+        await callback.answer("Enter balance to add.")
         sub_id = callback.data.split("_")[-1]
         sub = await submissions_col.find_one({"_id": ObjectId(sub_id)})
         
@@ -1428,7 +1548,7 @@ async def admin_accept_sub(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(AdminStates.waiting_for_submission_balance)
         await state.update_data(target_user_id=user_id, target_sub_id=sub_id)
         
-        prompt_text = "\n\n✅ **STATUS: ACCEPTING**\n\n👉 **Type how much balance to add, or type `/skip` to approve without asking for payment:**"
+        prompt_text = "\n\n✅ **STATUS: ACCEPTING**\n\n👉 **Type how much balance to add:**"
         
         if callback.message.caption:
             await callback.message.edit_caption(
@@ -1447,43 +1567,28 @@ async def admin_accept_sub(callback: CallbackQuery, state: FSMContext) -> None:
 async def process_submission_balance(message: Message, state: FSMContext, bot: Bot) -> None:
     try:
         if not message.text:
-            await message.reply("⚠️ Please enter a valid numerical amount or `/skip`.")
+            await message.reply("⚠️ Please enter a valid numerical amount.")
             return
         
-        text = message.text.strip().lower()
-        amount = 0
-        is_skipped = False
-        
-        if text == "/skip":
-            is_skipped = True
-        else:
-            try:
-                amount = int(text)
-            except ValueError:
-                await message.reply("⚠️ Please enter a valid number (e.g., 500) or `/skip`.")
-                return
+        try:
+            amount = int(message.text.strip())
+        except ValueError:
+            await message.reply("⚠️ Please enter a valid number (e.g., 500).")
+            return
                 
         data = await state.get_data()
         target_id = data.get("target_user_id")
         sub_id = data.get("target_sub_id")
         
-        if is_skipped:
-            await message.reply(f"✅ Successfully marked as Accepted (Skipped Payment) for User `{target_id}`.", parse_mode="Markdown", reply_markup=await get_admin_panel_keyboard())
-        else:
-            await message.reply(f"✅ Successfully marked as Accepted and added ₹{amount} to User `{target_id}`'s balance.", parse_mode="Markdown", reply_markup=await get_admin_panel_keyboard())
-            
+        await message.reply(f"✅ Successfully marked as Accepted and added ₹{amount} to User `{target_id}`'s balance.", parse_mode="Markdown", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
         
         async def accept_bg():
             if sub_id:
                 await submissions_col.update_one({"_id": ObjectId(sub_id)}, {"$set": {"status": "accepted"}})
-            if target_id:
-                if not is_skipped and amount > 0:
-                    await users_col.update_one({"user_id": target_id}, {"$inc": {"balance": amount}})
-                    notify_text = f"🎉 **Work Accepted!**\n\nYour recent work submission was approved.\n💰 **Balance Added:** ₹{amount}"
-                else:
-                    notify_text = f"🎉 **Work Accepted!**\n\nYour recent work submission was successfully approved."
-                    
+            if target_id and amount > 0:
+                await users_col.update_one({"user_id": target_id}, {"$inc": {"balance": amount}})
+                notify_text = f"🎉 **Work Accepted!**\n\nYour recent work submission was approved.\n💰 **Balance Added:** ₹{amount}"
                 try:
                     await bot.send_message(target_id, notify_text)
                 except Exception as e:
@@ -1555,7 +1660,6 @@ async def process_deny_reason(message: Message, state: FSMContext, bot: Bot) -> 
         logger.error(f"Error denying sub: {e}")
         await state.clear()
 
-# --- OTHER PRESERVED ADMIN COMMANDS ---
 
 @router.callback_query(F.data == "admin_add_user_panel")
 async def admin_add_user_prompt(callback: CallbackQuery, state: FSMContext) -> None:
@@ -1813,6 +1917,7 @@ async def prompt_upd_bal(callback: CallbackQuery, state: FSMContext) -> None:
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"manage_user_{uid}")]])
     await callback.message.edit_text("👉 Enter the NEW exact balance amount to OVERRIDE for this user:", reply_markup=kb)
 
+# PERMANENT MESSAGES FOR BALANCE/BROADCAST ADDED 
 @router.message(AdminStates.waiting_for_add_balance_amount)
 async def execute_add_bal(message: Message, state: FSMContext, bot: Bot) -> None:
     try:
@@ -2024,6 +2129,7 @@ async def execute_bcast_msg(message: Message, state: FSMContext, bot: Bot) -> No
             except Exception:
                 pass
                 
+        # This makes the success message persistent, it does not delete anything else.
         await processing_msg.delete()
         await message.reply(f"✅ Broadcast complete! Successfully sent to {sent_count} users.", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
