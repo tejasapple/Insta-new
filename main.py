@@ -21,6 +21,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
 import motor.motor_asyncio
 from motor.core import AgnosticCollection
@@ -384,6 +385,7 @@ async def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=maintenance_text, callback_data="admin_toggle_maintenance")
             ],
             [
+                InlineKeyboardButton(text="🏠 Main Panel", callback_data="back_to_menu"),
                 InlineKeyboardButton(text="❌ Close Panel", callback_data="admin_close")
             ]
         ]
@@ -455,9 +457,13 @@ async def show_withdrawal_list(callback: CallbackQuery) -> None:
         for w in withdrawals:
             text += f"✅ **{w['name']}** - ₹{w['amount']:,} at {w['time']}\n"
             
-        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]]
-        ))
+        try:
+            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]]
+            ))
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                logger.error(f"Edit text failed: {e}")
     except Exception as e:
         logger.error(f"Error in withdrawal_list: {e}")
 
@@ -482,9 +488,13 @@ async def show_active_members(callback: CallbackQuery) -> None:
                 text += f"📅 **{month} ({len(names)} Members)**\n"
                 text += ", ".join(names) + "\n\n"
                 
-        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]]
-        ))
+        try:
+            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]]
+            ))
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                logger.error(f"Edit text failed: {e}")
     except Exception as e:
         logger.error(f"Error in active_members: {e}")
 
@@ -501,9 +511,12 @@ async def show_balance(callback: CallbackQuery) -> None:
                 "This wallet feature and dashboard are restricted to official employees only.\n\n"
                 "💼 *If you wish to join our team, please use the 'Apply to work' button on the main menu.*"
             )
-            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]]
-            ))
+            try:
+                await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]]
+                ))
+            except TelegramBadRequest:
+                pass
             return
 
         balance = user.get("balance", 0)
@@ -512,9 +525,13 @@ async def show_balance(callback: CallbackQuery) -> None:
             f"👤 User: {callback.from_user.first_name}\n"
             f"💵 Current Balance: ₹{balance:,}"
         )
-        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]]
-        ))
+        try:
+            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]]
+            ))
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                logger.error(f"Edit text failed: {e}")
     except Exception as e:
         logger.error(f"Error in my_balance: {e}")
 
@@ -561,14 +578,18 @@ async def request_withdrawal(callback: CallbackQuery) -> None:
             ],
             [InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]
         ])
-        await callback.message.edit_text(text, reply_markup=kb)
+        
+        try:
+            await callback.message.edit_text(text, reply_markup=kb)
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                logger.error(f"Edit text failed: {e}")
     except Exception as e:
         logger.error(f"Error in request_withdraw: {e}")
 
 @router.callback_query(F.data.startswith("withdraw_method_"))
 async def handle_withdraw_method(callback: CallbackQuery) -> None:
     try:
-        await callback.answer()
         user = await get_user(callback.from_user.id)
         
         if not user or not user.get("is_active"):
@@ -600,18 +621,21 @@ async def staff_only_menu(callback: CallbackQuery) -> None:
             return
             
         await callback.answer()
-        # UPGRADE: UI Changes for single line layout
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🆕 New Work", callback_data="request_new_work")],
             [InlineKeyboardButton(text="📤 Submit Work", callback_data="submit_work")],
             [InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]
         ])
         
-        await callback.message.edit_text(
-            "👨‍💼 **Staff Only Dashboard**\n\n"
-            "Welcome to the staff portal. Here you can request your automated work batches or submit your completed tasks.",
-            reply_markup=kb
-        )
+        try:
+            await callback.message.edit_text(
+                "👨‍💼 **Staff Only Dashboard**\n\n"
+                "Welcome to the staff portal. Here you can request your automated work batches or submit your completed tasks.",
+                reply_markup=kb
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                logger.error(f"Edit text failed: {e}")
     except Exception as e:
         logger.error(f"Error in staff_only_menu: {e}")
 
@@ -630,7 +654,6 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         now = datetime.now()
         is_admin = await is_admin_user(callback.from_user.id)
         
-        # UPGRADE: New Work Logic Constraints
         if pending_second:
             await callback.answer("⏳ Please wait for the Admin to approve and give you your second batch.", show_alert=True)
             return
@@ -645,7 +668,6 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         elif step > 2:
             next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now
 
-        # Timer logic
         if step > 0 and next_allowed and now < next_allowed:
             if is_admin:
                 await callback.answer("🛠️ Admin Bypass: Timer ignored for testing.", show_alert=False)
@@ -661,12 +683,10 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
                 await callback.answer(msg, show_alert=True)
                 return
 
-        # Time passed but work not approved yet
         if step > 0 and not work_approved and not is_admin:
             await callback.answer("⚠️ Your previous work has not been approved yet. Tell Admin To Approve Your Pending Work.", show_alert=True)
             return
 
-        # Fetch dump settings
         dump_settings = await settings_col.find_one({"_id": "dump_settings"})
         if not dump_settings:
             await callback.answer("⚠️ Admin hasn't configured the Dump Channel yet.", show_alert=True)
@@ -719,7 +739,6 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
 
         sent_batches.extend(selected_batches)
         
-        # Step logic mapping 
         if step == 0:
             await users_col.update_one(
                 {"user_id": callback.from_user.id},
@@ -728,7 +747,6 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
                     "sent_batches": sent_batches
                 }}
             )
-            # Notify Admin for Second Batch approval
             admin_kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="Approved And Give", callback_data=f"give_second_batch_{callback.from_user.id}")
             ]])
@@ -773,10 +791,14 @@ async def submit_work_start(callback: CallbackQuery, state: FSMContext) -> None:
             [InlineKeyboardButton(text="« Back", callback_data="staff_only_menu")]
         ])
         
-        await callback.message.edit_text(
-            "📝 **Work Submission Panel**\n\nPlease send your **First Channel Link** below:",
-            reply_markup=cancel_kb
-        )
+        try:
+            await callback.message.edit_text(
+                "📝 **Work Submission Panel**\n\nPlease send your **First Channel Link** below:",
+                reply_markup=cancel_kb
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                logger.error(f"Edit text failed: {e}")
     except Exception as e:
         logger.error(f"Error in submit_work: {e}")
 
@@ -861,9 +883,15 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
             "• Submit your completed tasks for rapid approval.\n\n"
             "👇 *Please select an option below to navigate your dashboard:*"
         )
-        await callback.message.edit_text(text, reply_markup=get_main_menu_keyboard(settings["work_link"], settings["proof_link"], is_admin))
+        try:
+            await callback.message.edit_text(text, reply_markup=get_main_menu_keyboard(settings["work_link"], settings["proof_link"], is_admin))
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                logger.error(f"Edit text failed in back_to_menu: {e}")
     except Exception as e:
         logger.error(f"Error in back_to_menu: {e}")
+
+# --- END OF PART 1 ---
 # ==========================================
 # ADMIN PANEL (FULL CONTROL LOGIC)
 # ==========================================
@@ -888,7 +916,11 @@ async def open_admin_panel_callback(callback: CallbackQuery, state: FSMContext) 
             return
         await state.clear()
         text = "👑 **Admin Control Panel**\n\nWelcome back, Master. Select an option below to manage the bot:"
-        await callback.message.edit_text(text, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
+        try:
+            await callback.message.edit_text(text, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                logger.error(f"Edit text failed in open_admin_panel: {e}")
     except Exception as e:
         logger.error(f"Error in open_admin_panel: {e}")
 
@@ -914,7 +946,10 @@ async def toggle_maintenance_mode(callback: CallbackQuery) -> None:
         await callback.answer(f"Maintenance Mode is now {state_text}", show_alert=True)
         
         text = "👑 **Admin Control Panel**\n\nWelcome back, Master. Select an option below to manage the bot:"
-        await callback.message.edit_text(text, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
+        try:
+            await callback.message.edit_text(text, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
         
     except Exception as e:
         logger.error(f"Error toggling maintenance mode: {e}")
@@ -946,7 +981,10 @@ async def admin_show_stats(callback: CallbackQuery) -> None:
             f"⏳ **Unmarked (Pending) Submissions:** {pending_subs}\n"
             f"🔗 **Available Dump Batches:** {batches} ({total_videos} videos)"
         )
-        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]]), parse_mode="Markdown")
+        try:
+            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]]), parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in admin_stats: {e}")
 
@@ -995,7 +1033,10 @@ async def dp_storage_menu(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="📁 Step 3", callback_data="dp_view_step3"), InlineKeyboardButton(text="📁 Step 4", callback_data="dp_view_step4")],
             [InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]
         ])
-        await callback.message.edit_text("🖼️ **DP Storage (Steps)**\n\nStorage completely synced in Database. Select a step:", reply_markup=kb)
+        try:
+            await callback.message.edit_text("🖼️ **DP Storage (Steps)**\n\nStorage completely synced in Database. Select a step:", reply_markup=kb)
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in dp_storage_menu: {e}")
 
@@ -1017,7 +1058,10 @@ async def view_dp_step(callback: CallbackQuery, state: FSMContext) -> None:
             [InlineKeyboardButton(text="🗑️ Clear Step", callback_data=f"dp_clear_{step}")],
             [InlineKeyboardButton(text="« Back", callback_data="admin_dp_storage_menu")]
         ])
-        await callback.message.edit_text(text, reply_markup=kb)
+        try:
+            await callback.message.edit_text(text, reply_markup=kb)
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in view_dp_step: {e}")
 
@@ -1030,12 +1074,15 @@ async def add_dp_step_media(callback: CallbackQuery, state: FSMContext) -> None:
         await state.update_data(dp_step=step)
         
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data=f"dp_view_{step}")]])
-        await callback.message.edit_text(
-            f"📤 **Adding to {step.capitalize()}**\n\n"
-            f"👉 Please send a Photo, Video, or Text message.\n"
-            f"*(Everything is safely stored inside Database for persistence)*", 
-            reply_markup=kb
-        )
+        try:
+            await callback.message.edit_text(
+                f"📤 **Adding to {step.capitalize()}**\n\n"
+                f"👉 Please send a Photo, Video, or Text message.\n"
+                f"*(Everything is safely stored inside Database for persistence)*", 
+                reply_markup=kb
+            )
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in add_dp_step_media: {e}")
 
@@ -1159,7 +1206,10 @@ async def clear_dp_step(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="🗑️ Clear Step", callback_data=f"dp_clear_{step}")],
             [InlineKeyboardButton(text="« Back", callback_data="admin_dp_storage_menu")]
         ])
-        await callback.message.edit_text(f"📁 **{step.capitalize()} Storage**\nTotal Items: `0`\n\nWhat would you like to do?", reply_markup=kb)
+        try:
+            await callback.message.edit_text(f"📁 **{step.capitalize()} Storage**\nTotal Items: `0`\n\nWhat would you like to do?", reply_markup=kb)
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in clear_dp_step: {e}")
 
@@ -1179,7 +1229,10 @@ async def dp_bank_menu(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="🗑️ Clear Bank", callback_data="dpbank_clear")],
             [InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]
         ])
-        await callback.message.edit_text(text, reply_markup=kb)
+        try:
+            await callback.message.edit_text(text, reply_markup=kb)
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in dp_bank_menu: {e}")
 
@@ -1189,7 +1242,10 @@ async def add_dpbank_photo(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         await state.set_state(AdminStates.waiting_for_dp_bank_media)
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="admin_dp_bank_menu")]])
-        await callback.message.edit_text("📤 **Adding to DP Bank**\n\nPlease send a **Photo** to store it safely in the DB:", reply_markup=kb)
+        try:
+            await callback.message.edit_text("📤 **Adding to DP Bank**\n\nPlease send a **Photo** to store it safely in the DB:", reply_markup=kb)
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in add_dpbank_photo: {e}")
 
@@ -1286,7 +1342,10 @@ async def clear_dpbank(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="🗑️ Clear Bank", callback_data="dpbank_clear")],
             [InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]
         ])
-        await callback.message.edit_text("🏦 **DP Bank**\nTotal Photos: `0`\n\nManage your massive collection of DPs:", reply_markup=kb)
+        try:
+            await callback.message.edit_text("🏦 **DP Bank**\nTotal Photos: `0`\n\nManage your massive collection of DPs:", reply_markup=kb)
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in clear_dpbank: {e}")
 
@@ -1305,7 +1364,10 @@ async def admin_set_dump_channel_prompt(callback: CallbackQuery, state: FSMConte
             "*(Alternatively, if it's a public channel, you can send the raw message link like `https://t.me/c/123456789/2`)*\n\n"
             "⚠️ *Invite links (like `t.me/+xyz`) will not work directly.*"
         )
-        await callback.message.edit_text(text, reply_markup=cancel_kb, parse_mode="Markdown")
+        try:
+            await callback.message.edit_text(text, reply_markup=cancel_kb, parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in admin_set_dump_channel_prompt: {e}")
 
@@ -1415,7 +1477,10 @@ async def admin_unmarked_subs(callback: CallbackQuery) -> None:
         kb.button(text="« Back", callback_data="admin_cancel")
         kb.adjust(1)
         
-        await callback.message.edit_text("📋 **Unmarked Work Submissions (Newest First):**\nClick on a user to review their work:", reply_markup=kb.as_markup(), parse_mode="Markdown")
+        try:
+            await callback.message.edit_text("📋 **Unmarked Work Submissions (Newest First):**\nClick on a user to review their work:", reply_markup=kb.as_markup(), parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in admin_unmarked_subs: {e}")
 
@@ -1448,14 +1513,17 @@ async def admin_marked_subs(callback: CallbackQuery) -> None:
         kb.button(text="« Back", callback_data="admin_cancel")
         kb.adjust(1)
         
-        await callback.message.edit_text("📁 **Marked Work Submissions (History):**\nClick on a user to view their processed history:", reply_markup=kb.as_markup(), parse_mode="Markdown")
+        try:
+            await callback.message.edit_text("📁 **Marked Work Submissions (History):**\nClick on a user to view their processed history:", reply_markup=kb.as_markup(), parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in admin_marked_subs: {e}")
 
 @router.callback_query(F.data.startswith("view_unmarked_"))
 async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
     try:
-        await callback.answer()
+        await callback.answer() # API Limit fix
         user_id = int(callback.data.split("_")[-1])
         sub = await submissions_col.find_one({"user_id": user_id, "status": "pending"}, sort=[("timestamp", -1)])
         if not sub:
@@ -1489,21 +1557,25 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
         ])
         
         photo_id = sub.get("photo_id")
-        if photo_id:
-            await bot.send_photo(
-                chat_id=callback.from_user.id,
-                photo=photo_id,
-                caption=caption_text,
-                reply_markup=action_kb,
-                parse_mode="Markdown"
-            )
-        else:
-            await bot.send_message(
-                chat_id=callback.from_user.id,
-                text=caption_text,
-                reply_markup=action_kb,
-                parse_mode="Markdown"
-            )
+        try:
+            if photo_id:
+                await bot.send_photo(
+                    chat_id=callback.from_user.id,
+                    photo=photo_id,
+                    caption=caption_text,
+                    reply_markup=action_kb,
+                    parse_mode="Markdown"
+                )
+            else:
+                await bot.send_message(
+                    chat_id=callback.from_user.id,
+                    text=caption_text,
+                    reply_markup=action_kb,
+                    parse_mode="Markdown"
+                )
+        except Exception as ex:
+            logger.error(f"Error sending submission details to admin: {ex}")
+            await callback.answer("⚠️ Failed to display submission. Check logs.", show_alert=True)
     except Exception as e:
         logger.error(f"Error opening unmarked submission: {e}")
 
@@ -1533,10 +1605,13 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
         ])
         
         photo_id = sub.get("photo_id")
-        if photo_id:
-            await bot.send_photo(chat_id=callback.from_user.id, photo=photo_id, caption=caption_text, reply_markup=action_kb, parse_mode="Markdown")
-        else:
-            await bot.send_message(chat_id=callback.from_user.id, text=caption_text, reply_markup=action_kb, parse_mode="Markdown")
+        try:
+            if photo_id:
+                await bot.send_photo(chat_id=callback.from_user.id, photo=photo_id, caption=caption_text, reply_markup=action_kb, parse_mode="Markdown")
+            else:
+                await bot.send_message(chat_id=callback.from_user.id, text=caption_text, reply_markup=action_kb, parse_mode="Markdown")
+        except Exception as ex:
+            logger.error(f"Error sending marked sub details: {ex}")
     except Exception as e:
         logger.error(f"Error opening marked submission: {e}")
 
@@ -1544,7 +1619,7 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
 @router.callback_query(F.data.startswith("skip_sub_"))
 async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
     try:
-        await callback.answer("Skipping payment...")
+        await callback.answer("Skipping payment...") # Immediate answer
         sub_id = callback.data.split("_")[-1]
         sub = await submissions_col.find_one({"_id": ObjectId(sub_id)})
         
@@ -1565,10 +1640,13 @@ async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
             pass
             
         success_text = f"✅ Sub ID `{sub_id}` marked as Accepted (Skipped Payment) for User `{user_id}`."
-        if callback.message.caption:
-            await callback.message.edit_caption(caption=callback.message.caption + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs")]]))
-        else:
-            await callback.message.edit_text(text=callback.message.text + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs")]]))
+        try:
+            if callback.message.caption:
+                await callback.message.edit_caption(caption=callback.message.caption + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs")]]))
+            else:
+                await callback.message.edit_text(text=callback.message.text + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs")]]))
+        except TelegramBadRequest:
+            pass
 
     except Exception as e:
         logger.error(f"Error in skip_sub: {e}")
@@ -1576,7 +1654,7 @@ async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
 @router.callback_query(F.data.startswith("accept_sub_"))
 async def admin_accept_sub(callback: CallbackQuery, state: FSMContext) -> None:
     try:
-        await callback.answer("Enter balance to add.")
+        await callback.answer("Enter balance to add.") # Immediate answer
         sub_id = callback.data.split("_")[-1]
         sub = await submissions_col.find_one({"_id": ObjectId(sub_id)})
         
@@ -1591,16 +1669,19 @@ async def admin_accept_sub(callback: CallbackQuery, state: FSMContext) -> None:
         
         prompt_text = "\n\n✅ **STATUS: ACCEPTING**\n\n👉 **Type how much balance to add:**"
         
-        if callback.message.caption:
-            await callback.message.edit_caption(
-                caption=callback.message.caption + prompt_text,
-                reply_markup=None
-            )
-        else:
-            await callback.message.edit_text(
-                text=callback.message.text + prompt_text,
-                reply_markup=None
-            )
+        try:
+            if callback.message.caption:
+                await callback.message.edit_caption(
+                    caption=callback.message.caption + prompt_text,
+                    reply_markup=None
+                )
+            else:
+                await callback.message.edit_text(
+                    text=callback.message.text + prompt_text,
+                    reply_markup=None
+                )
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in accept_sub: {e}")
 
@@ -1645,7 +1726,7 @@ async def process_submission_balance(message: Message, state: FSMContext, bot: B
 @router.callback_query(F.data.startswith("deny_sub_"))
 async def admin_deny_sub(callback: CallbackQuery, state: FSMContext) -> None:
     try:
-        await callback.answer("Enter denial reason.")
+        await callback.answer("Enter denial reason.") # Immediate answer
         sub_id = callback.data.split("_")[-1]
         sub = await submissions_col.find_one({"_id": ObjectId(sub_id)})
         
@@ -1660,16 +1741,19 @@ async def admin_deny_sub(callback: CallbackQuery, state: FSMContext) -> None:
         
         prompt_text = "\n\n❌ **STATUS: DENYING**\n\n👉 **Please type the reason for denying this work submission:**"
         
-        if callback.message.caption:
-            await callback.message.edit_caption(
-                caption=callback.message.caption + prompt_text,
-                reply_markup=None
-            )
-        else:
-            await callback.message.edit_text(
-                text=callback.message.text + prompt_text,
-                reply_markup=None
-            )
+        try:
+            if callback.message.caption:
+                await callback.message.edit_caption(
+                    caption=callback.message.caption + prompt_text,
+                    reply_markup=None
+                )
+            else:
+                await callback.message.edit_text(
+                    text=callback.message.text + prompt_text,
+                    reply_markup=None
+                )
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in deny_sub: {e}")
 
@@ -1770,7 +1854,7 @@ async def admin_give_second_batch(callback: CallbackQuery, bot: Bot) -> None:
         try:
             new_text = callback.message.text + "\n\n✅ **GIVEN SECOND BATCH**"
             await callback.message.edit_text(new_text, reply_markup=None)
-        except Exception:
+        except TelegramBadRequest:
             pass
             
     except Exception as e:
@@ -1793,7 +1877,10 @@ async def admin_add_user_prompt(callback: CallbackQuery, state: FSMContext) -> N
             "• `https://t.me/username`\n\n"
             "*Note: If they haven't started the bot yet, they will be pre-approved!*"
         )
-        await callback.message.edit_text(text, reply_markup=cancel_kb, parse_mode="Markdown")
+        try:
+            await callback.message.edit_text(text, reply_markup=cancel_kb, parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in admin_add_user_prompt: {e}")
 
@@ -1863,7 +1950,10 @@ async def admin_check_user_prompt(callback: CallbackQuery, state: FSMContext) ->
         await callback.answer()
         await state.set_state(AdminStates.waiting_for_user_query)
         cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
-        await callback.message.edit_text("🔍 **Check User**\n\nPlease send the User ID, @username, or First Name of the user:", reply_markup=cancel_kb, parse_mode="Markdown")
+        try:
+            await callback.message.edit_text("🔍 **Check User**\n\nPlease send the User ID, @username, or First Name of the user:", reply_markup=cancel_kb, parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in admin_check_user_prompt: {e}")
 
@@ -1921,7 +2011,10 @@ async def admin_manage_admins_prompt(callback: CallbackQuery, state: FSMContext)
             "Please send the **Telegram User ID** of the person you want to make an Admin:\n\n"
             "*(This person will have full access to the admin panel)*"
         )
-        await callback.message.edit_text(text, reply_markup=cancel_kb, parse_mode="Markdown")
+        try:
+            await callback.message.edit_text(text, reply_markup=cancel_kb, parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in admin_manage_admins_prompt: {e}")
 
@@ -1970,7 +2063,10 @@ async def admin_currently_users(callback: CallbackQuery) -> None:
         
         total_added = len(real_users)
         text = f"👥 **Currently Assigned Users**\nTotal Assigned: {total_added}\n\nSelect a user below to view their work profile and manage balance:"
-        await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+        try:
+            await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in admin_currently_users: {e}")
 
@@ -2006,7 +2102,10 @@ async def admin_manage_specific_user(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="« Back", callback_data="admin_currently_users")]
         ])
         
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+        try:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in manage_user: {e}")
 
@@ -2017,7 +2116,10 @@ async def prompt_add_bal(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminStates.waiting_for_add_balance_amount)
     await state.update_data(target_user_id=uid)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"manage_user_{uid}")]])
-    await callback.message.edit_text("👉 Enter the numerical amount to ADD to this user's balance:", reply_markup=kb)
+    try:
+        await callback.message.edit_text("👉 Enter the numerical amount to ADD to this user's balance:", reply_markup=kb)
+    except TelegramBadRequest:
+        pass
 
 @router.callback_query(F.data.startswith("rembal_"))
 async def prompt_rem_bal(callback: CallbackQuery, state: FSMContext) -> None:
@@ -2026,7 +2128,10 @@ async def prompt_rem_bal(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminStates.waiting_for_remove_balance_amount)
     await state.update_data(target_user_id=uid)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"manage_user_{uid}")]])
-    await callback.message.edit_text("👉 Enter the numerical amount to REMOVE from this user's balance:", reply_markup=kb)
+    try:
+        await callback.message.edit_text("👉 Enter the numerical amount to REMOVE from this user's balance:", reply_markup=kb)
+    except TelegramBadRequest:
+        pass
 
 @router.callback_query(F.data.startswith("updbal_"))
 async def prompt_upd_bal(callback: CallbackQuery, state: FSMContext) -> None:
@@ -2035,7 +2140,10 @@ async def prompt_upd_bal(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminStates.waiting_for_update_balance_amount)
     await state.update_data(target_user_id=uid)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"manage_user_{uid}")]])
-    await callback.message.edit_text("👉 Enter the NEW exact balance amount to OVERRIDE for this user:", reply_markup=kb)
+    try:
+        await callback.message.edit_text("👉 Enter the NEW exact balance amount to OVERRIDE for this user:", reply_markup=kb)
+    except TelegramBadRequest:
+        pass
 
 @router.message(AdminStates.waiting_for_add_balance_amount)
 async def execute_add_bal(message: Message, state: FSMContext, bot: Bot) -> None:
@@ -2107,7 +2215,10 @@ async def prompt_msg_user(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminStates.waiting_for_single_msg)
     await state.update_data(target_user_id=uid)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"manage_user_{uid}")]])
-    await callback.message.edit_text("👉 Send the message you want to send to this specific user (Text, Photo, Video, etc.):", reply_markup=kb)
+    try:
+        await callback.message.edit_text("👉 Send the message you want to send to this specific user (Text, Photo, Video, etc.):", reply_markup=kb)
+    except TelegramBadRequest:
+        pass
 
 @router.message(AdminStates.waiting_for_single_msg)
 async def execute_msg_user(message: Message, state: FSMContext, bot: Bot) -> None:
@@ -2123,9 +2234,15 @@ async def execute_msg_user(message: Message, state: FSMContext, bot: Bot) -> Non
         await message.reply("⚠️ Failed to send message. User might have blocked the bot.", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
 
+
+# ==========================================
+# UPGRADE: BROADCAST ONLY TO ACTIVE MEMBERS
+# ==========================================
+
 async def get_broadcast_ui(page: int, selected_ids: list) -> InlineKeyboardMarkup:
-    users = await users_col.find().sort("join_date", -1).skip(page*40).limit(40).to_list(40)
-    total_users = await users_col.count_documents({})
+    # UPGRADE: Now it only finds active users
+    users = await users_col.find({"is_active": True}).sort("join_date", -1).skip(page*40).limit(40).to_list(40)
+    total_users = await users_col.count_documents({"is_active": True})
     kb = InlineKeyboardBuilder()
     now = datetime.now()
     
@@ -2152,7 +2269,7 @@ async def get_broadcast_ui(page: int, selected_ids: list) -> InlineKeyboardMarku
         
     kb.row(
         InlineKeyboardButton(text="📤 Send Broadcast", callback_data="bcast_send_selected"),
-        InlineKeyboardButton(text="🌍 Broadcast to ALL", callback_data="bcast_send_all")
+        InlineKeyboardButton(text="🌍 Broadcast to ACTIVE", callback_data="bcast_send_all")
     )
     kb.row(InlineKeyboardButton(text="« Back", callback_data="open_admin_panel"))
     
@@ -2164,7 +2281,10 @@ async def bcast_menu_start(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         await state.update_data(bcast_selected_ids=[])
         kb = await get_broadcast_ui(0, [])
-        await callback.message.edit_text("📢 **Broadcast Menu**\n\nSelect users to send a message to, or broadcast to everyone:", reply_markup=kb, parse_mode="Markdown")
+        try:
+            await callback.message.edit_text("📢 **Broadcast Menu (ACTIVE MEMBERS ONLY)**\n\nSelect active users to send a message to, or broadcast to everyone:", reply_markup=kb, parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error starting broadcast menu: {e}")
 
@@ -2176,7 +2296,10 @@ async def bcast_page_change(callback: CallbackQuery, state: FSMContext) -> None:
         data = await state.get_data()
         selected = data.get("bcast_selected_ids", [])
         kb = await get_broadcast_ui(page, selected)
-        await callback.message.edit_reply_markup(reply_markup=kb)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=kb)
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error changing broadcast page: {e}")
 
@@ -2198,7 +2321,10 @@ async def bcast_toggle_user(callback: CallbackQuery, state: FSMContext) -> None:
             
         await state.update_data(bcast_selected_ids=selected)
         kb = await get_broadcast_ui(page, selected)
-        await callback.message.edit_reply_markup(reply_markup=kb)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=kb)
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error toggling broadcast user: {e}")
 
@@ -2218,8 +2344,11 @@ async def bcast_prepare_send(callback: CallbackQuery, state: FSMContext) -> None
         await state.update_data(bcast_mode=mode)
         
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_broadcast_menu")]])
-        text = f"👉 Send the message you want to broadcast to **{mode.upper()}** users:\n\n*(You can send text, photo, video, etc.)*"
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+        text = f"👉 Send the message you want to broadcast to **{mode.upper()} ACTIVE** users:\n\n*(You can send text, photo, video, etc.)*"
+        try:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error preparing broadcast message: {e}")
 
@@ -2232,12 +2361,13 @@ async def execute_bcast_msg(message: Message, state: FSMContext, bot: Bot) -> No
         
         targets = []
         if mode == "all":
-            users = await users_col.find().to_list(None)
+            # UPGRADE: Now it explicitly filters only is_active = True
+            users = await users_col.find({"is_active": True}).to_list(None)
             targets = [u["user_id"] for u in users]
         else:
             targets = selected
             
-        processing_msg = await message.reply(f"⏳ Broadcasting to {len(targets)} users...")
+        processing_msg = await message.reply(f"⏳ Broadcasting to {len(targets)} ACTIVE users...")
         sent_count = 0
         
         for uid in targets:
@@ -2249,7 +2379,7 @@ async def execute_bcast_msg(message: Message, state: FSMContext, bot: Bot) -> No
                 pass
                 
         await processing_msg.delete()
-        await message.reply(f"✅ Broadcast complete! Successfully sent to {sent_count} users.", reply_markup=await get_admin_panel_keyboard())
+        await message.reply(f"✅ Broadcast complete! Successfully sent to {sent_count} ACTIVE users.", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
     except Exception as e:
         logger.error(f"Error sending broadcast: {e}")
@@ -2276,10 +2406,13 @@ async def admin_all_work_links(callback: CallbackQuery) -> None:
         subs = await submissions_col.find({"status": "pending"}).sort("timestamp", -1).skip(skip_count).limit(page_size).to_list(length=page_size)
         
         if not subs and page == 0:
-            await callback.message.edit_text(
-                "✅ No pending links found.", 
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]])
-            )
+            try:
+                await callback.message.edit_text(
+                    "✅ No pending links found.", 
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]])
+                )
+            except TelegramBadRequest:
+                pass
             return
             
         text = "🔗 **User Work Links (Newest First)**\n\n"
@@ -2316,8 +2449,11 @@ async def admin_all_work_links(callback: CallbackQuery) -> None:
                 reply_markup=kb.as_markup(), 
                 link_preview_options=LinkPreviewOptions(is_disabled=True)
             )
-        except Exception:
-            await callback.message.edit_text(text, reply_markup=kb.as_markup(), disable_web_page_preview=True)
+        except TelegramBadRequest:
+            try:
+                await callback.message.edit_text(text, reply_markup=kb.as_markup(), disable_web_page_preview=True)
+            except TelegramBadRequest:
+                pass
             
     except Exception as e:
         logger.error(f"Error in admin_work_links: {e}")
@@ -2328,7 +2464,10 @@ async def admin_set_work_prompt(callback: CallbackQuery, state: FSMContext) -> N
         await callback.answer()
         await state.set_state(AdminStates.waiting_for_work_link)
         cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
-        await callback.message.edit_text("🔗 **Set Work Link**\n\nPlease send the new URL for the 'Apply to Work' button:", reply_markup=cancel_kb, parse_mode="Markdown")
+        try:
+            await callback.message.edit_text("🔗 **Set Work Link**\n\nPlease send the new URL for the 'Apply to Work' button:", reply_markup=cancel_kb, parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in admin_set_work_prompt: {e}")
 
@@ -2356,7 +2495,10 @@ async def admin_set_proof_prompt(callback: CallbackQuery, state: FSMContext) -> 
         await callback.answer()
         await state.set_state(AdminStates.waiting_for_proof_link)
         cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
-        await callback.message.edit_text("🔗 **Set Proof Link**\n\nPlease send the new URL for the 'Updates' button:", reply_markup=cancel_kb, parse_mode="Markdown")
+        try:
+            await callback.message.edit_text("🔗 **Set Proof Link**\n\nPlease send the new URL for the 'Updates' button:", reply_markup=cancel_kb, parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in admin_set_proof_prompt: {e}")
 
@@ -2384,7 +2526,10 @@ async def admin_cancel_action(callback: CallbackQuery, state: FSMContext) -> Non
         await callback.answer()
         await state.clear()
         text = "👑 **Admin Control Panel**\n\nWelcome back, Master. Select an option below to manage the bot:"
-        await callback.message.edit_text(text, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
+        try:
+            await callback.message.edit_text(text, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
+        except TelegramBadRequest:
+            pass
     except Exception as e:
         logger.error(f"Error in admin_cancel: {e}")
 
