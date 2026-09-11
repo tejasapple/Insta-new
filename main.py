@@ -85,6 +85,11 @@ async def save_media(data: Dict[str, Any]) -> None:
 # HELPER FUNCTIONS
 # ==========================================
 
+def clean_md(text: Any) -> str:
+    """Sanitize user input to prevent Telegram Markdown parsing errors."""
+    if text is None: return "N/A"
+    return str(text).replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace(']', '\\]').replace('`', '\\`')
+
 async def is_admin_user(user_id: int) -> bool:
     if user_id == ADMIN_ID:
         return True
@@ -1125,7 +1130,7 @@ async def receive_dp_storage_media(message: Message, state: FSMContext) -> None:
             await save_media(media_data)
             save_msg = f"✅ Media ID saved to DB under **{step.capitalize()}**!"
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Step Menu", callback_data=f"dp_view_{step}")]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"dp_view_{step}")]])
         await message.reply(f"{save_msg}\n\nYou can keep sending more data to save, or go back.", reply_markup=kb)
     except Exception as e:
         logger.error(f"Error in receive_dp_storage_media: {e}")
@@ -1180,7 +1185,7 @@ async def show_dp_step_media_paginated(callback: CallbackQuery, bot: Bot) -> Non
             
         if nav_row:
             nav_kb.row(*nav_row)
-        nav_kb.row(InlineKeyboardButton(text="« Back to Step Menu", callback_data=f"dp_view_{step}"))
+        nav_kb.row(InlineKeyboardButton(text="« Back", callback_data=f"dp_view_{step}"))
         
         await callback.message.answer(f"Navigation for {step.capitalize()}:", reply_markup=nav_kb.as_markup())
             
@@ -1260,7 +1265,7 @@ async def receive_dp_bank_photo(message: Message, state: FSMContext) -> None:
         media_data["dp_bank"].append(file_id)
         await save_media(media_data)
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to DP Bank", callback_data="admin_dp_bank_menu")]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_dp_bank_menu")]])
         await message.reply("✅ Photo ID saved to DB DP Bank!\n\nYou can keep sending more photos.", reply_markup=kb)
     except Exception as e:
         logger.error(f"Error in receive_dp_bank_photo: {e}")
@@ -1277,7 +1282,7 @@ async def show_dpbank_random(callback: CallbackQuery, bot: Bot) -> None:
             return
             
         random_photo = random.choice(items)
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to DP Bank", callback_data="admin_dp_bank_menu")]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_dp_bank_menu")]])
         await bot.send_photo(callback.from_user.id, photo=random_photo, caption="🎲 **Random Photo from DP Bank**", reply_markup=kb)
     except Exception as e:
         logger.error(f"Error in show_dpbank_random: {e}")
@@ -1320,7 +1325,7 @@ async def show_dpbank_all_paginated(callback: CallbackQuery, bot: Bot) -> None:
             
         if nav_row:
             nav_kb.row(*nav_row)
-        nav_kb.row(InlineKeyboardButton(text="« Back to Bank Menu", callback_data="admin_dp_bank_menu"))
+        nav_kb.row(InlineKeyboardButton(text="« Back", callback_data="admin_dp_bank_menu"))
         
         await callback.message.answer("Navigation:", reply_markup=nav_kb.as_markup())
             
@@ -1578,9 +1583,11 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
             await callback.answer("⚠️ No more unmarked submissions for this user.", show_alert=True)
             return
         
-        l1 = str(sub.get('link1', sub.get('link', 'N/A')))
-        l2 = str(sub.get('link2', 'N/A'))
-        v = str(sub.get('views', 'N/A'))
+        # APPLIED CLEAN_MD FIX TO PREVENT CRASH
+        l1 = clean_md(str(sub.get('link1', sub.get('link', 'N/A'))))
+        l2 = clean_md(str(sub.get('link2', 'N/A')))
+        v = clean_md(str(sub.get('views', 'N/A')))
+        name = clean_md(str(sub.get('user_name', 'Unknown')))
         
         # TRUNCATE HUGE TEXT TO PREVENT CAPTION/API LIMIT ERROR (1024 char limit)
         if len(l1) > 200: l1 = l1[:197] + "..."
@@ -1588,7 +1595,7 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
         if len(v) > 200: v = v[:197] + "..."
         
         caption_text = (
-            f"👤 **User:** {sub.get('user_name')}\n"
+            f"👤 **User:** {name}\n"
             f"🆔 **ID:** `{sub.get('user_id')}`\n"
             f"📌 **Status:** UNMARKED\n"
             f"🔗 **Channel 1:** {l1}\n"
@@ -1606,7 +1613,7 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
             [
                 InlineKeyboardButton(text="❌ Deny", callback_data=f"deny_sub_{sub_id}")
             ],
-            [InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs_0")]
+            [InlineKeyboardButton(text="« Back", callback_data="admin_unmarked_subs_0")]
         ])
         
         photo_id = sub.get("photo_id")
@@ -1644,15 +1651,17 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
             
         status = "✅ ACCEPTED" if sub.get("status") == "accepted" else "❌ DENIED"
         
-        l1 = str(sub.get('link1', sub.get('link', 'N/A')))
-        l2 = str(sub.get('link2', 'N/A'))
+        # APPLIED CLEAN_MD FIX TO PREVENT CRASH
+        l1 = clean_md(str(sub.get('link1', sub.get('link', 'N/A'))))
+        l2 = clean_md(str(sub.get('link2', 'N/A')))
+        name = clean_md(str(sub.get('user_name', 'Unknown')))
         
         # TRUNCATE FOR API LIMIT
         if len(l1) > 200: l1 = l1[:197] + "..."
         if len(l2) > 200: l2 = l2[:197] + "..."
         
         caption_text = (
-            f"👤 **User:** {sub.get('user_name')}\n"
+            f"👤 **User:** {name}\n"
             f"🆔 **ID:** `{sub.get('user_id')}`\n"
             f"📌 **Status:** {status}\n"
             f"🔗 **Channel 1:** {l1}\n"
@@ -1661,7 +1670,7 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
         )
         
         action_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="« Back to Marked", callback_data="admin_marked_subs_0")]
+            [InlineKeyboardButton(text="« Back", callback_data="admin_marked_subs_0")]
         ])
         
         photo_id = sub.get("photo_id")
@@ -1675,8 +1684,6 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
     except Exception as e:
         logger.error(f"Error opening marked submission: {e}")
 
-# UPGRADE: Added "work_approved" setting so user can proceed to next step
-# BUTTON SPEED FIX: Moving DB save to background task
 @router.callback_query(F.data.startswith("skip_sub_"))
 async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
     try:
@@ -1693,9 +1700,9 @@ async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
         success_text = f"✅ Sub ID `{sub_id}` marked as Accepted (Skipped Payment) for User `{user_id}`."
         try:
             if callback.message.caption:
-                await callback.message.edit_caption(caption=callback.message.caption + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs_0")]]))
+                await callback.message.edit_caption(caption=callback.message.caption + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_unmarked_subs_0")]]))
             else:
-                await callback.message.edit_text(text=callback.message.text + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Unmarked", callback_data="admin_unmarked_subs_0")]]))
+                await callback.message.edit_text(text=callback.message.text + "\n\n" + success_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_unmarked_subs_0")]]))
         except TelegramBadRequest:
             pass
 
@@ -1770,7 +1777,6 @@ async def process_submission_balance(message: Message, state: FSMContext, bot: B
             if sub_id:
                 await submissions_col.update_one({"_id": ObjectId(sub_id)}, {"$set": {"status": "accepted"}})
             if target_id and amount > 0:
-                # Upgraded to set work_approved = True
                 await users_col.update_one({"user_id": target_id}, {"$set": {"work_approved": True}, "$inc": {"balance": amount}})
                 notify_text = f"🎉 **Work Accepted!**\n\nYour recent work submission was approved. You can now request next work.\n💰 **Balance Added:** ₹{amount}"
                 try:
@@ -1847,8 +1853,6 @@ async def process_deny_reason(message: Message, state: FSMContext, bot: Bot) -> 
         logger.error(f"Error denying sub: {e}")
         await state.clear()
 
-
-# --- UPGRADE: GIVE SECOND BATCH LOGIC (BACKGROUND FAST) ---
 @router.callback_query(F.data.startswith("give_second_batch_"))
 async def admin_give_second_batch(callback: CallbackQuery, bot: Bot) -> None:
     try:
@@ -2299,12 +2303,7 @@ async def execute_msg_user(message: Message, state: FSMContext, bot: Bot) -> Non
         await state.clear()
 
 
-# ==========================================
-# UPGRADE: BROADCAST ONLY TO ACTIVE MEMBERS
-# ==========================================
-
 async def get_broadcast_ui(page: int, selected_ids: list) -> InlineKeyboardMarkup:
-    # UPGRADE: Now it only finds active users
     users = await users_col.find({"is_active": True}).sort("join_date", -1).skip(page*40).limit(40).to_list(40)
     total_users = await users_col.count_documents({"is_active": True})
     kb = InlineKeyboardBuilder()
@@ -2425,7 +2424,6 @@ async def execute_bcast_msg(message: Message, state: FSMContext, bot: Bot) -> No
         
         targets = []
         if mode == "all":
-            # UPGRADE: Now it explicitly filters only is_active = True
             users = await users_col.find({"is_active": True}).to_list(None)
             targets = [u["user_id"] for u in users]
         else:
