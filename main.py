@@ -49,10 +49,9 @@ db = db_client["insta_work_bot"]
 users_col: AgnosticCollection = db["users"]
 submissions_col: AgnosticCollection = db["submissions"]
 settings_col: AgnosticCollection = db["settings"]
-dump_links_col: AgnosticCollection = db["dump_links"]  # NEW: Persistent storage for Dump Links
 
 # ==========================================
-# MULTI-ADMIN CHECK HELPER
+# HELPER FUNCTIONS
 # ==========================================
 
 async def is_admin_user(user_id: int) -> bool:
@@ -65,6 +64,19 @@ async def is_admin_user(user_id: int) -> bool:
     except Exception as e:
         logger.error(f"Error checking admin status: {e}")
     return False
+
+def parse_telegram_link(link: str) -> Tuple[Any, Any]:
+    """Parses a telegram link and returns chat_id and message_id."""
+    match = re.search(r't\.me/(?:c/)?([^/]+)/(\d+)', link)
+    if match:
+        chat_ref = match.group(1)
+        msg_id = int(match.group(2))
+        if chat_ref.isdigit():
+            chat_id = int("-100" + chat_ref)
+        else:
+            chat_id = "@" + chat_ref
+        return chat_id, msg_id
+    return None, None
 
 # ==========================================
 # MAINTENANCE MIDDLEWARE
@@ -95,38 +107,6 @@ class MaintenanceMiddleware(BaseMiddleware):
 router = Router()
 router.message.middleware(MaintenanceMiddleware())
 router.callback_query.middleware(MaintenanceMiddleware())
-
-# ==========================================
-# VIDEO FORWARDING HELPER
-# ==========================================
-async def forward_videos_from_link(bot: Bot, user_id: int, link: str) -> None:
-    """Extracts chat info from a Telegram link and copies (forwards) 6 subsequent messages (videos) without downloading"""
-    try:
-        match = re.search(r't\.me/(?:c/)?([^/]+)/(\d+)', link)
-        if match:
-            chat_ref = match.group(1)
-            msg_id = int(match.group(2))
-            
-            if chat_ref.isdigit():
-                chat_id = int("-100" + chat_ref)
-            else:
-                chat_id = "@" + chat_ref
-                
-            success_count = 0
-            for i in range(6):
-                try:
-                    await bot.copy_message(chat_id=user_id, from_chat_id=chat_id, message_id=msg_id + i)
-                    success_count += 1
-                    await asyncio.sleep(0.1)
-                except Exception as e:
-                    logger.warning(f"Failed to copy message {msg_id + i} from {chat_id}: {e}")
-            
-            if success_count == 0:
-                await bot.send_message(user_id, f"🔗 Batch Link: {link}\n*Please fetch the 6 videos from this link manually as I couldn't access them.*", parse_mode="Markdown")
-        else:
-            await bot.send_message(user_id, f"🔗 Batch Link: {link}\n*Invalid link format. Please check manually.*", parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Error parsing forward link: {e}")
 
 # ==========================================
 # FAKE DATA & LOGIC
@@ -247,7 +227,8 @@ async def register_user_if_not_exists(user_id: int, username: str, first_name: s
             "submission_count": 0,
             "join_date": datetime.now(),
             "approval_date": None,
-            "schedule_step": 0 
+            "schedule_step": 0,
+            "sent_batches": [] 
         })
     except Exception as e:
         logger.error(f"Error registering user {user_id}: {e}")
@@ -288,7 +269,8 @@ class AdminStates(StatesGroup):
     waiting_for_add_admin = State()
     waiting_for_single_msg = State()
     waiting_for_broadcast_msg = State()
-    waiting_for_dump_links = State() 
+    waiting_for_dump_channel_link = State() 
+    waiting_for_dump_total_videos = State()
 
 # ==========================================
 # KEYBOARDS
@@ -341,7 +323,7 @@ async def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="🔍 Check User", callback_data="admin_check_user"),
-                InlineKeyboardButton(text="📥 Add Dump Links", callback_data="admin_add_dump_links") 
+                InlineKeyboardButton(text="📥 Set Dump Channel", callback_data="admin_set_dump_channel") 
             ],
             [
                 InlineKeyboardButton(text="📝 Unmarked Subs", callback_data="admin_unmarked_subs"), 
@@ -591,61 +573,85 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             await callback.answer("🚫 Access Denied! This is for only our staff.", show_alert=True)
             return
 
-        approval_date = user.get("approval_date", datetime.now())
-        last_work_time = user.get("last_work_time")
         step = user.get("schedule_step", 0)
-        
+        last_work_time = user.get("last_work_time")
         now = datetime.now()
         
+        # Step timing logic
         if step == 0:
-            next_allowed = approval_date + timedelta(hours=4)
-            required_links = 2
+            next_allowed = None
+            required_batches = 2
         elif step == 1:
-            next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now
-            required_links = 2
+            next_allowed = last_work_time + timedelta(hours=4)
+            required_batches = 4
         elif step == 2:
-            next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now
-            required_links = 4
+            next_allowed = last_work_time + timedelta(hours=6)
+            required_batches = 4
         else:
-            next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now
-            required_links = 2
+            next_allowed = last_work_time + timedelta(hours=8)
+            required_batches = 4
 
-        if now < next_allowed:
+        if next_allowed and now < next_allowed:
             wait_time = next_allowed - now
             hours, remainder = divmod(wait_time.total_seconds(), 3600)
             minutes = remainder // 60
-            await callback.answer(f"⏳ Next work batch is not ready yet.\n\nPlease wait {int(hours)} hours and {int(minutes)} minutes.", show_alert=True)
+            await callback.answer(f"⏳ Next batch is locked.\n\nPlease wait {int(hours)} hours and {int(minutes)} minutes.", show_alert=True)
             return
 
-        available_links_cursor = dump_links_col.find().sort("added_at", 1).limit(required_links)
-        available_links = await available_links_cursor.to_list(length=required_links)
+        # Fetch dump settings
+        dump_settings = await settings_col.find_one({"_id": "dump_settings"})
+        if not dump_settings:
+            await callback.answer("⚠️ Admin hasn't configured the Dump Channel yet.", show_alert=True)
+            return
 
-        if len(available_links) < required_links:
-            await callback.answer(f"⚠️ Admin hasn't added enough links in Dump. Need {required_links}, available {len(available_links)}.", show_alert=True)
+        chat_id = dump_settings.get("chat_id")
+        base_msg_id = dump_settings.get("base_msg_id")
+        total_videos = dump_settings.get("total_videos", 0)
+        total_batches_available = total_videos // 6
+
+        sent_batches = user.get("sent_batches", [])
+        available_batches = [i for i in range(total_batches_available) if i not in sent_batches]
+
+        if len(available_batches) < required_batches:
+            await callback.answer("⚠️ Not enough new unique videos available in the Dump Channel. Please contact Admin.", show_alert=True)
             return
 
         await callback.answer("📥 Processing your work batch...")
+        await callback.message.answer(f"🚀 **New Work Assigned!**\nDelivering {required_batches} batches (6 videos each)...")
         
-        assigned_links = [doc["link"] for doc in available_links]
-        doc_ids = [doc["_id"] for doc in available_links]
-
-        # Delete the fetched links from DB so they are not reused
-        await dump_links_col.delete_many({"_id": {"$in": doc_ids}})
-
-        await callback.message.answer(f"🚀 **New Work Assigned!**\nDelivering {required_links} batches (6 videos each)...")
+        selected_batches = random.sample(available_batches, required_batches)
         
-        for link in assigned_links:
-            await forward_videos_from_link(bot, callback.from_user.id, link)
-            await asyncio.sleep(1)
+        for idx, batch_idx in enumerate(selected_batches, 1):
+            await callback.message.answer(f"📦 **Batch {idx}**")
+            start_msg_id = base_msg_id + (batch_idx * 6)
+            success_count = 0
+            
+            for i in range(6):
+                try:
+                    await bot.copy_message(
+                        chat_id=callback.from_user.id,
+                        from_chat_id=chat_id,
+                        message_id=start_msg_id + i
+                    )
+                    success_count += 1
+                    await asyncio.sleep(0.3)
+                except Exception as e:
+                    logger.warning(f"Failed to copy msg {start_msg_id + i} from {chat_id}: {e}")
+            
+            if success_count == 0:
+                await callback.message.answer("⚠️ *Could not fetch videos for this batch.*", parse_mode="Markdown")
+
+        # Update DB
+        sent_batches.extend(selected_batches)
+        await users_col.update_one(
+            {"user_id": callback.from_user.id},
+            {"$set": {
+                "last_work_time": now,
+                "sent_batches": sent_batches
+            }, "$inc": {"schedule_step": 1}}
+        )
 
         await callback.message.answer("✅ **Work Delivered!**\n\nUpload 6-6 reels on both accounts and submit work.")
-        
-        async def update_work_status():
-            await users_col.update_one(
-                {"user_id": callback.from_user.id},
-                {"$set": {"last_work_time": datetime.now()}, "$inc": {"schedule_step": 1}}
-            )
-        asyncio.create_task(update_work_status())
 
     except Exception as e:
         logger.error(f"Error in request_new_work: {e}")
@@ -822,7 +828,10 @@ async def admin_show_stats(callback: CallbackQuery) -> None:
         active_users = await users_col.count_documents({"is_active": True})
         total_subs = await submissions_col.count_documents({})
         pending_subs = await submissions_col.count_documents({"status": "pending"})
-        links_count = await dump_links_col.count_documents({})
+        
+        dump_settings = await settings_col.find_one({"_id": "dump_settings"})
+        total_videos = dump_settings.get("total_videos", 0) if dump_settings else 0
+        batches = total_videos // 6
         
         text = (
             "📊 **Bot Statistics**\n\n"
@@ -830,7 +839,7 @@ async def admin_show_stats(callback: CallbackQuery) -> None:
             f"✅ **Active Members:** {active_users}\n"
             f"📥 **Total Submissions:** {total_subs}\n"
             f"⏳ **Unmarked (Pending) Submissions:** {pending_subs}\n"
-            f"🔗 **Available Dump Links (MongoDB):** {links_count}"
+            f"🔗 **Available Dump Batches:** {batches} ({total_videos} videos)"
         )
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]]), parse_mode="Markdown")
     except Exception as e:
@@ -843,7 +852,7 @@ async def admin_backup(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("Generaing Backup...")
         
         users = await users_col.find({}, {"_id": 0}).to_list(length=None)
-        links = await dump_links_col.find({}, {"_id": 0}).to_list(length=None)
+        dump_settings = await settings_col.find_one({"_id": "dump_settings"}, {"_id": 0})
         
         # Format datetimes for JSON serialization
         for u in users:
@@ -854,7 +863,7 @@ async def admin_backup(callback: CallbackQuery, bot: Bot) -> None:
         backup_data = {
             "timestamp": datetime.now().isoformat(),
             "users": users,
-            "dump_links": links,
+            "dump_settings": dump_settings,
             "info": "This backup is for your reference. MongoDB Atlas automatically restores this data on every VPS start."
         }
         
@@ -871,43 +880,75 @@ async def admin_backup(callback: CallbackQuery, bot: Bot) -> None:
         logger.error(f"Error generating backup: {e}")
         await callback.answer("⚠️ Failed to generate backup.", show_alert=True)
 
-# --- ADD DUMP LINKS LOGIC (MONGODB) ---
+# --- SINGLE DUMP CHANNEL LOGIC (NEW) ---
 
-@router.callback_query(F.data == "admin_add_dump_links")
-async def admin_add_dump_links_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data == "admin_set_dump_channel")
+async def admin_set_dump_channel_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     try:
         await callback.answer()
-        await state.set_state(AdminStates.waiting_for_dump_links)
-        links_count = await dump_links_col.count_documents({})
+        await state.set_state(AdminStates.waiting_for_dump_channel_link)
         cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
         text = (
-            "📥 **Add Dump Links**\n\n"
-            "Please send the Telegram message links (one per line) containing the 6-video batches.\n\n"
-            f"Currently safely stored in Database: **{links_count} links**\n"
-            "*(These links are securely stored in MongoDB and will auto-fetch even if VPS restarts)*"
+            "📥 **Set Dump Channel**\n\n"
+            "Please send the Telegram link to the **FIRST** video message in your Dump Channel.\n\n"
+            "*Example:* `https://t.me/c/123456789/2` or `https://t.me/dumpchannel/5`\n\n"
+            "*(Bot will automatically calculate batches based on this and fetch without downloading)*"
         )
         await callback.message.edit_text(text, reply_markup=cancel_kb, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Error in admin_add_dump_links_prompt: {e}")
+        logger.error(f"Error in admin_set_dump_channel_prompt: {e}")
 
-@router.message(AdminStates.waiting_for_dump_links)
-async def admin_add_dump_links_save(message: Message, state: FSMContext) -> None:
+@router.message(AdminStates.waiting_for_dump_channel_link)
+async def admin_set_dump_channel_link(message: Message, state: FSMContext) -> None:
     try:
-        raw_text = message.text.strip()
-        links = [l.strip() for l in raw_text.split('\n') if "t.me" in l]
-        
-        if not links:
-            await message.reply("⚠️ No valid Telegram links found. Try again or cancel.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="admin_cancel")]]))
+        link = message.text.strip()
+        chat_id, msg_id = parse_telegram_link(link)
+        if not chat_id or not msg_id:
+            await message.reply("⚠️ Invalid link format. Please ensure it looks like `https://t.me/c/123456789/2`.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="admin_cancel")]]))
             return
-
-        docs = [{"link": l, "added_at": datetime.now()} for l in links]
-        await dump_links_col.insert_many(docs)
         
-        total_links = await dump_links_col.count_documents({})
-        await message.reply(f"✅ Successfully added **{len(links)}** links to Database.\nTotal links available: **{total_links}**", reply_markup=await get_admin_panel_keyboard())
-        await state.clear()
+        await state.update_data(dump_chat_id=chat_id, dump_base_msg_id=msg_id)
+        await state.set_state(AdminStates.waiting_for_dump_total_videos)
+        await message.reply("✅ Link accepted.\n\nNow, please send the **TOTAL number of videos** uploaded in this channel (e.g., `300`):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="admin_cancel")]]))
     except Exception as e:
-        logger.error(f"Error saving dump links: {e}")
+        logger.error(f"Error in admin_set_dump_channel_link: {e}")
+
+@router.message(AdminStates.waiting_for_dump_total_videos)
+async def admin_set_dump_total_videos(message: Message, state: FSMContext) -> None:
+    try:
+        total_videos = int(message.text.strip())
+        if total_videos < 6:
+            await message.reply("⚠️ Total videos must be at least 6.")
+            return
+        
+        data = await state.get_data()
+        chat_id = data["dump_chat_id"]
+        base_msg_id = data["dump_base_msg_id"]
+        
+        await settings_col.update_one(
+            {"_id": "dump_settings"},
+            {"$set": {
+                "chat_id": chat_id,
+                "base_msg_id": base_msg_id,
+                "total_videos": total_videos
+            }},
+            upsert=True
+        )
+        
+        batches = total_videos // 6
+        success_msg = (
+            f"✅ **Dump Channel Configured Successfully!**\n\n"
+            f"📌 Chat ID: `{chat_id}`\n"
+            f"📌 Base Msg ID: `{base_msg_id}`\n"
+            f"📌 Total Videos: `{total_videos}`\n"
+            f"📦 Total Batches Available: `{batches}`"
+        )
+        await message.reply(success_msg, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
+        await state.clear()
+    except ValueError:
+        await message.reply("⚠️ Please send a valid number.")
+    except Exception as e:
+        logger.error(f"Error in admin_set_dump_total_videos: {e}")
 
 # --- UNMARKED & MARKED SUBMISSIONS LOGIC ---
 
@@ -1271,7 +1312,8 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
                     "balance": 0,
                     "submission_count": 0,
                     "join_date": datetime.now(),
-                    "schedule_step": 0
+                    "schedule_step": 0,
+                    "sent_batches": []
                 })
             asyncio.create_task(insert_new_user())
             
