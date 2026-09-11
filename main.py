@@ -4,15 +4,16 @@ import os
 import random
 import re
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Callable, Awaitable
 
-from aiogram import Bot, Dispatcher, Router, F
+from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
 from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    LinkPreviewOptions
+    LinkPreviewOptions,
+    TelegramObject
 )
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.state import State, StatesGroup
@@ -47,14 +48,6 @@ users_col: AgnosticCollection = db["users"]
 submissions_col: AgnosticCollection = db["submissions"]
 settings_col: AgnosticCollection = db["settings"]
 
-router = Router()
-
-# ==========================================
-# IN-MEMORY STORAGE FOR DUMP LINKS
-# ==========================================
-# Links will be stored in bot memory and reset on restart (as requested)
-MEMORY_LINKS: List[str] = []
-
 # ==========================================
 # MULTI-ADMIN CHECK HELPER
 # ==========================================
@@ -69,6 +62,44 @@ async def is_admin_user(user_id: int) -> bool:
     except Exception as e:
         logger.error(f"Error checking admin status: {e}")
     return False
+
+# ==========================================
+# MAINTENANCE MIDDLEWARE
+# ==========================================
+class MaintenanceMiddleware(BaseMiddleware):
+    async def __call__(
+        self, 
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]], 
+        event: TelegramObject, 
+        data: Dict[str, Any]
+    ) -> Any:
+        user = data.get("event_from_user")
+        if user:
+            # Check if maintenance mode is enabled
+            status_doc = await settings_col.find_one({"_id": "system_status"})
+            is_maintenance = status_doc.get("maintenance_mode", False) if status_doc else False
+            
+            if is_maintenance:
+                is_admin = await is_admin_user(user.id)
+                if not is_admin:
+                    if isinstance(event, Message):
+                        await event.answer("🛠 **Maintenance Mode ON**\n\nThe bot is currently undergoing maintenance and upgrades. Please check back later!", parse_mode="Markdown")
+                    elif isinstance(event, CallbackQuery):
+                        await event.answer("🛠 Maintenance Mode ON. The bot is being upgraded.", show_alert=True)
+                    return # Stop propagation, do not execute the handler
+        
+        return await handler(event, data)
+
+router = Router()
+# Register Middleware to block non-admins when Maintenance is ON
+router.message.middleware(MaintenanceMiddleware())
+router.callback_query.middleware(MaintenanceMiddleware())
+
+# ==========================================
+# IN-MEMORY STORAGE FOR DUMP LINKS
+# ==========================================
+# Links will be stored in bot memory and reset on restart (as requested)
+MEMORY_LINKS: List[str] = []
 
 # ==========================================
 # VIDEO FORWARDING HELPER
@@ -262,7 +293,7 @@ class AdminStates(StatesGroup):
     waiting_for_add_admin = State()
     waiting_for_single_msg = State()
     waiting_for_broadcast_msg = State()
-    waiting_for_dump_links = State() # NEW STATE
+    waiting_for_dump_links = State() 
 
 # ==========================================
 # KEYBOARDS
@@ -293,7 +324,7 @@ def get_main_menu_keyboard(work_link: str, proof_link: str, is_admin: bool = Fal
             InlineKeyboardButton(text="📢 Updates", url=sanitize_url(proof_link))
         ],
         [
-            InlineKeyboardButton(text="👨‍💼 Staff Only", callback_data="staff_only_menu") # UPDATED BUTTON
+            InlineKeyboardButton(text="👨‍💼 Staff Only", callback_data="staff_only_menu") 
         ]
     ]
     
@@ -302,7 +333,11 @@ def get_main_menu_keyboard(work_link: str, proof_link: str, is_admin: bool = Fal
         
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
+async def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
+    status_doc = await settings_col.find_one({"_id": "system_status"})
+    maintenance_on = status_doc.get("maintenance_mode", False) if status_doc else False
+    maintenance_text = "🛠 Maint: ON 🟢" if maintenance_on else "🛠 Maint: OFF 🔴"
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -311,11 +346,11 @@ def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="🔍 Check User", callback_data="admin_check_user"),
-                InlineKeyboardButton(text="📥 Add Dump Links", callback_data="admin_add_dump_links") # NEW FEATURE
+                InlineKeyboardButton(text="📥 Add Dump Links", callback_data="admin_add_dump_links") 
             ],
             [
-                InlineKeyboardButton(text="📝 Unmarked Subs", callback_data="admin_unmarked_subs"), # UPDATED
-                InlineKeyboardButton(text="✅ Marked Subs", callback_data="admin_marked_subs") # NEW FEATURE
+                InlineKeyboardButton(text="📝 Unmarked Subs", callback_data="admin_unmarked_subs"), 
+                InlineKeyboardButton(text="✅ Marked Subs", callback_data="admin_marked_subs") 
             ],
             [
                 InlineKeyboardButton(text="👥 Active Users", callback_data="admin_currently_users"),
@@ -328,6 +363,9 @@ def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="🔗 Set Work Link", callback_data="admin_set_work"),
                 InlineKeyboardButton(text="🔗 Set Proof Link", callback_data="admin_set_proof")
+            ],
+            [
+                InlineKeyboardButton(text=maintenance_text, callback_data="admin_toggle_maintenance") # NEW TOGGLE BUTTON
             ],
             [
                 InlineKeyboardButton(text="❌ Close Panel", callback_data="admin_close")
@@ -438,7 +476,7 @@ async def show_active_members(callback: CallbackQuery) -> None:
 async def show_balance(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
-        user = await get_user(callback.fromuser.id)
+        user = await get_user(callback.from_user.id)
         balance = user.get("balance", 0)
         text = (
             f"💰 **My Wallet Balance**\n\n"
@@ -460,7 +498,6 @@ async def request_withdrawal(callback: CallbackQuery) -> None:
     try:
         user = await get_user(callback.from_user.id)
         
-        # FIX: Immediate Access Denied check for non-staff
         if not user or not user.get("is_active"):
             await callback.answer("Access Denied! This is for only our staff.", show_alert=True)
             return
@@ -469,7 +506,6 @@ async def request_withdrawal(callback: CallbackQuery) -> None:
         if not approval_date:
             approval_date = user.get("join_date")
             
-        # FIX: Timer accurately evaluated right at the click of Withdrawal button
         delta = datetime.now() - approval_date
         total_seconds = (timedelta(days=3) - delta).total_seconds()
         
@@ -531,7 +567,6 @@ async def staff_only_menu(callback: CallbackQuery) -> None:
         await callback.answer()
         user = await get_user(callback.from_user.id)
         
-        # Access Denied for Normal Users
         if not user or not user.get("is_active"):
             await callback.answer("🚫 Access Denied!\n\nThis is for only our staff.", show_alert=True)
             return
@@ -566,7 +601,6 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         
         now = datetime.now()
         
-        # Define Timing and Batch Logic
         if step == 0:
             next_allowed = approval_date + timedelta(hours=4)
             required_links = 2
@@ -577,7 +611,6 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now
             required_links = 4
         else:
-            # Default to 6-hour recurring batches thereafter
             next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now
             required_links = 2
 
@@ -594,7 +627,6 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
 
         await callback.answer("📥 Processing your work batch...")
         
-        # Pull Links from In-Memory Storage
         assigned_links = []
         for _ in range(required_links):
             assigned_links.append(MEMORY_LINKS.pop(0))
@@ -607,7 +639,6 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
 
         await callback.message.answer("✅ **Work Delivered!**\n\nUpload 6-6 reels on both accounts and submit work.")
         
-        # Update User Status in Background
         async def update_work_status():
             await users_col.update_one(
                 {"user_id": callback.from_user.id},
@@ -682,7 +713,7 @@ async def process_work_views(message: Message, state: FSMContext) -> None:
             "link2": data.get("link2", "N/A"),
             "photo_id": data.get("photo_id"),
             "views": views,
-            "status": "pending", # Pending means 'Unmarked'
+            "status": "pending", 
             "timestamp": datetime.now()
         }
         
@@ -737,7 +768,7 @@ async def admin_panel_cmd(message: Message, state: FSMContext) -> None:
             return
         await state.clear()
         text = "👑 **Admin Control Panel**\n\nWelcome back, Master. Select an option below to manage the bot:"
-        await message.reply(text, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+        await message.reply(text, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in admin command: {e}")
 
@@ -750,9 +781,37 @@ async def open_admin_panel_callback(callback: CallbackQuery, state: FSMContext) 
             return
         await state.clear()
         text = "👑 **Admin Control Panel**\n\nWelcome back, Master. Select an option below to manage the bot:"
-        await callback.message.edit_text(text, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+        await callback.message.edit_text(text, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in open_admin_panel: {e}")
+
+# --- MAINTENANCE TOGGLE LOGIC ---
+@router.callback_query(F.data == "admin_toggle_maintenance")
+async def toggle_maintenance_mode(callback: CallbackQuery) -> None:
+    try:
+        if not await is_admin_user(callback.from_user.id):
+            await callback.answer("🚫 Access Denied", show_alert=True)
+            return
+            
+        status_doc = await settings_col.find_one({"_id": "system_status"})
+        current_status = status_doc.get("maintenance_mode", False) if status_doc else False
+        new_status = not current_status
+        
+        await settings_col.update_one(
+            {"_id": "system_status"},
+            {"$set": {"maintenance_mode": new_status}},
+            upsert=True
+        )
+        
+        state_text = "ON 🟢" if new_status else "OFF 🔴"
+        await callback.answer(f"Maintenance Mode is now {state_text}", show_alert=True)
+        
+        text = "👑 **Admin Control Panel**\n\nWelcome back, Master. Select an option below to manage the bot:"
+        await callback.message.edit_text(text, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Error toggling maintenance mode: {e}")
+        await callback.answer("⚠️ Error occurred.", show_alert=True)
 
 @router.callback_query(F.data == "admin_stats")
 async def admin_show_stats(callback: CallbackQuery) -> None:
@@ -805,7 +864,7 @@ async def admin_add_dump_links_save(message: Message, state: FSMContext) -> None
 
         MEMORY_LINKS.extend(links)
         
-        await message.reply(f"✅ Successfully added **{len(links)}** links to memory.\nTotal links available: **{len(MEMORY_LINKS)}**", reply_markup=get_admin_panel_keyboard())
+        await message.reply(f"✅ Successfully added **{len(links)}** links to memory.\nTotal links available: **{len(MEMORY_LINKS)}**", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
     except Exception as e:
         logger.error(f"Error saving dump links: {e}")
@@ -816,7 +875,6 @@ async def admin_add_dump_links_save(message: Message, state: FSMContext) -> None
 async def admin_unmarked_subs(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
-        # Group Unmarked (Pending)
         pipeline = [
             {"$match": {"status": "pending"}},
             {"$sort": {"timestamp": -1}}, 
@@ -850,7 +908,6 @@ async def admin_unmarked_subs(callback: CallbackQuery) -> None:
 async def admin_marked_subs(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
-        # Group Marked (Accepted/Denied)
         pipeline = [
             {"$match": {"status": {"$in": ["accepted", "denied"]}}},
             {"$sort": {"timestamp": -1}}, 
@@ -936,7 +993,6 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
     try:
         await callback.answer()
         user_id = int(callback.data.split("_")[-1])
-        # Just fetch the latest marked sub to view (history peek)
         sub = await submissions_col.find_one({"user_id": user_id, "status": {"$in": ["accepted", "denied"]}}, sort=[("timestamp", -1)])
         if not sub:
             await callback.answer("⚠️ History empty.", show_alert=True)
@@ -1008,7 +1064,7 @@ async def process_submission_balance(message: Message, state: FSMContext, bot: B
         target_id = data.get("target_user_id")
         sub_id = data.get("target_sub_id")
         
-        await message.reply(f"✅ Successfully marked as Accepted and added ₹{amount} to User `{target_id}`'s balance.", parse_mode="Markdown", reply_markup=get_admin_panel_keyboard())
+        await message.reply(f"✅ Successfully marked as Accepted and added ₹{amount} to User `{target_id}`'s balance.", parse_mode="Markdown", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
         
         async def accept_bg():
@@ -1068,7 +1124,7 @@ async def process_deny_reason(message: Message, state: FSMContext, bot: Bot) -> 
         target_id = data.get("target_user_id")
         sub_id = data.get("target_sub_id")
         
-        await message.reply(f"✅ Submission marked as DENIED for User `{target_id}`.", parse_mode="Markdown", reply_markup=get_admin_panel_keyboard())
+        await message.reply(f"✅ Submission marked as DENIED for User `{target_id}`.", parse_mode="Markdown", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
         
         async def deny_bg():
@@ -1130,7 +1186,7 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
             
         if user:
             name = user.get("first_name", query)
-            await message.reply(f"✅ User **{name}** is now an ACTIVE member! (Processing in bg)", reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+            await message.reply(f"✅ User **{name}** is now an ACTIVE member! (Processing in bg)", reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
             
             async def update_existing_user():
                 await users_col.update_one(
@@ -1144,7 +1200,7 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
             name = query
             
             success_msg = f"✅ User `{query}` has been **pre-approved** and added to Active Members!\n(Processing in background)"
-            await message.reply(success_msg, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+            await message.reply(success_msg, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
             
             async def insert_new_user():
                 await users_col.insert_one({
@@ -1163,7 +1219,7 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
         await state.clear()
     except Exception as e:
         logger.error(f"Error in admin_add_user_save: {e}")
-        await message.reply("⚠️ Error adding user. Check format.", reply_markup=get_admin_panel_keyboard())
+        await message.reply("⚠️ Error adding user. Check format.", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
 
 @router.callback_query(F.data == "admin_check_user")
@@ -1195,7 +1251,7 @@ async def admin_check_user_result(message: Message, state: FSMContext) -> None:
         users = await users_col.find(db_query).to_list(5)
         
         if not users:
-            await message.reply(f"⚠️ No user found for `{query}`.", reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+            await message.reply(f"⚠️ No user found for `{query}`.", reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
             await state.clear()
             return
             
@@ -1214,7 +1270,7 @@ async def admin_check_user_result(message: Message, state: FSMContext) -> None:
             )
             await message.reply(text, parse_mode="Markdown")
             
-        await message.answer("Select another action:", reply_markup=get_admin_panel_keyboard())
+        await message.answer("Select another action:", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
     except Exception as e:
         logger.error(f"Error in admin_check_user_result: {e}")
@@ -1238,7 +1294,7 @@ async def admin_manage_admins_prompt(callback: CallbackQuery, state: FSMContext)
 async def admin_manage_admins_save(message: Message, state: FSMContext) -> None:
     try:
         new_admin_id = int(message.text.strip())
-        await message.reply(f"✅ User ID `{new_admin_id}` has been successfully added as an Admin!", reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+        await message.reply(f"✅ User ID `{new_admin_id}` has been successfully added as an Admin!", reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
         await state.clear()
         
         async def add_admin_bg():
@@ -1250,11 +1306,11 @@ async def admin_manage_admins_save(message: Message, state: FSMContext) -> None:
         asyncio.create_task(add_admin_bg())
         
     except ValueError:
-        await message.reply("⚠️ Please enter a valid numerical User ID.", reply_markup=get_admin_panel_keyboard())
+        await message.reply("⚠️ Please enter a valid numerical User ID.", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
     except Exception as e:
         logger.error(f"Error adding admin: {e}")
-        await message.reply("⚠️ Error adding admin. Check logs.", reply_markup=get_admin_panel_keyboard())
+        await message.reply("⚠️ Error adding admin. Check logs.", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
 
 @router.callback_query(F.data == "admin_currently_users")
@@ -1353,7 +1409,7 @@ async def execute_add_bal(message: Message, state: FSMContext, bot: Bot) -> None
         data = await state.get_data()
         uid = data.get("target_user_id")
         
-        await message.reply(f"✅ ₹{amount} added to user `{uid}`.", reply_markup=get_admin_panel_keyboard())
+        await message.reply(f"✅ ₹{amount} added to user `{uid}`.", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
         
         async def add_bg():
@@ -1374,7 +1430,7 @@ async def execute_rem_bal(message: Message, state: FSMContext, bot: Bot) -> None
         data = await state.get_data()
         uid = data.get("target_user_id")
         
-        await message.reply(f"✅ ₹{amount} removed from user `{uid}`.", reply_markup=get_admin_panel_keyboard())
+        await message.reply(f"✅ ₹{amount} removed from user `{uid}`.", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
         
         async def rem_bg():
@@ -1395,7 +1451,7 @@ async def execute_upd_bal(message: Message, state: FSMContext, bot: Bot) -> None
         data = await state.get_data()
         uid = data.get("target_user_id")
         
-        await message.reply(f"✅ Balance of user `{uid}` updated successfully to ₹{amount}.", reply_markup=get_admin_panel_keyboard())
+        await message.reply(f"✅ Balance of user `{uid}` updated successfully to ₹{amount}.", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
         
         async def upd_bg():
@@ -1425,11 +1481,11 @@ async def execute_msg_user(message: Message, state: FSMContext, bot: Bot) -> Non
         uid = data.get("target_user_id")
         
         await bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=message.message_id)
-        await message.reply(f"✅ Message sent successfully to User ID `{uid}`!", reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+        await message.reply(f"✅ Message sent successfully to User ID `{uid}`!", reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
         await state.clear()
     except Exception as e:
         logger.error(f"Error sending message to user: {e}")
-        await message.reply("⚠️ Failed to send message. User might have blocked the bot.", reply_markup=get_admin_panel_keyboard())
+        await message.reply("⚠️ Failed to send message. User might have blocked the bot.", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
 
 async def get_broadcast_ui(page: int, selected_ids: list) -> InlineKeyboardMarkup:
@@ -1558,7 +1614,7 @@ async def execute_bcast_msg(message: Message, state: FSMContext, bot: Bot) -> No
                 pass
                 
         await processing_msg.delete()
-        await message.reply(f"✅ Broadcast complete! Successfully sent to {sent_count} users.", reply_markup=get_admin_panel_keyboard())
+        await message.reply(f"✅ Broadcast complete! Successfully sent to {sent_count} users.", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
     except Exception as e:
         logger.error(f"Error sending broadcast: {e}")
@@ -1645,7 +1701,7 @@ async def admin_set_work_prompt(callback: CallbackQuery, state: FSMContext) -> N
 async def admin_set_work_save(message: Message, state: FSMContext) -> None:
     try:
         new_link = message.text.strip()
-        await message.reply(f"✅ 'Apply to Work' button link updated successfully!\n\nNew Link: {new_link}", reply_markup=get_admin_panel_keyboard())
+        await message.reply(f"✅ 'Apply to Work' button link updated successfully!\n\nNew Link: {new_link}", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
         
         async def save_work_link_bg():
@@ -1673,7 +1729,7 @@ async def admin_set_proof_prompt(callback: CallbackQuery, state: FSMContext) -> 
 async def admin_set_proof_save(message: Message, state: FSMContext) -> None:
     try:
         new_link = message.text.strip()
-        await message.reply(f"✅ 'Updates' button link updated successfully!\n\nNew Link: {new_link}", reply_markup=get_admin_panel_keyboard())
+        await message.reply(f"✅ 'Updates' button link updated successfully!\n\nNew Link: {new_link}", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
         
         async def save_proof_link_bg():
@@ -1693,7 +1749,7 @@ async def admin_cancel_action(callback: CallbackQuery, state: FSMContext) -> Non
         await callback.answer()
         await state.clear()
         text = "👑 **Admin Control Panel**\n\nWelcome back, Master. Select an option below to manage the bot:"
-        await callback.message.edit_text(text, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+        await callback.message.edit_text(text, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in admin_cancel: {e}")
 
