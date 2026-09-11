@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 import motor.motor_asyncio
 from motor.core import AgnosticCollection
 from bson import ObjectId
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Load environment variables
 load_dotenv()
@@ -49,33 +50,35 @@ db = db_client["insta_work_bot"]
 users_col: AgnosticCollection = db["users"]
 submissions_col: AgnosticCollection = db["submissions"]
 settings_col: AgnosticCollection = db["settings"]
-dp_texts_col: AgnosticCollection = db["dp_texts"]  # NEW: MongoDB text storage for DP
+dp_texts_col: AgnosticCollection = db["dp_texts"] 
 
 # ==========================================
-# LOCAL MEDIA STORAGE (NOT IN MONGO)
+# MONGODB MEDIA STORAGE (UPGRADED FOR VPS MIGRATION)
 # ==========================================
-MEDIA_FILE = "local_media_storage.json"
 
-def load_media() -> Dict[str, Any]:
+async def load_media() -> Dict[str, Any]:
     default_data = {
         "dp_storage": {"step1": [], "step2": [], "step3": [], "step4": []},
         "dp_bank": []
     }
-    if not os.path.exists(MEDIA_FILE):
-        return default_data
     try:
-        with open(MEDIA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        doc = await settings_col.find_one({"_id": "media_storage"})
+        if doc and "data" in doc:
+            return doc["data"]
+        return default_data
     except Exception as e:
-        logger.error(f"Error loading media JSON, returning default: {e}")
+        logger.error(f"Error loading media from DB, returning default: {e}")
         return default_data
 
-def save_media(data: Dict[str, Any]) -> None:
+async def save_media(data: Dict[str, Any]) -> None:
     try:
-        with open(MEDIA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
+        await settings_col.update_one(
+            {"_id": "media_storage"},
+            {"$set": {"data": data}},
+            upsert=True
+        )
     except Exception as e:
-        logger.error(f"Error saving media JSON: {e}")
+        logger.error(f"Error saving media to DB: {e}")
 
 # ==========================================
 # HELPER FUNCTIONS
@@ -93,7 +96,6 @@ async def is_admin_user(user_id: int) -> bool:
     return False
 
 def parse_telegram_link(link: str) -> Tuple[Any, Any]:
-    """Parses a telegram link and returns chat_id and message_id."""
     match = re.search(r't\.me/(?:c/)?([^/]+)/(\d+)', link)
     if match:
         chat_ref = match.group(1)
@@ -255,7 +257,10 @@ async def register_user_if_not_exists(user_id: int, username: str, first_name: s
             "join_date": datetime.now(),
             "approval_date": None,
             "schedule_step": 0,
-            "sent_batches": [] 
+            "sent_batches": [],
+            "pending_second_batch": False, 
+            "work_approved": True, 
+            "last_work_time": None
         })
     except Exception as e:
         logger.error(f"Error registering user {user_id}: {e}")
@@ -595,11 +600,10 @@ async def staff_only_menu(callback: CallbackQuery) -> None:
             return
             
         await callback.answer()
+        # UPGRADE: UI Changes for single line layout
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🆕 New Work", callback_data="request_new_work"),
-                InlineKeyboardButton(text="📤 Submit Work", callback_data="submit_work")
-            ],
+            [InlineKeyboardButton(text="🆕 New Work", callback_data="request_new_work")],
+            [InlineKeyboardButton(text="📤 Submit Work", callback_data="submit_work")],
             [InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]
         ])
         
@@ -620,38 +624,47 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             return
 
         step = user.get("schedule_step", 0)
+        pending_second = user.get("pending_second_batch", False)
+        work_approved = user.get("work_approved", True)
         last_work_time = user.get("last_work_time")
         now = datetime.now()
         is_admin = await is_admin_user(callback.from_user.id)
         
-        # New Step timing logic as per requirements
-        if step == 0:
-            next_allowed = None
-            required_batches = 2
-            wait_hours = 4
-        elif step == 1:
-            next_allowed = last_work_time + timedelta(hours=4)
-            required_batches = 4
-            wait_hours = 6
+        # UPGRADE: New Work Logic Constraints
+        if pending_second:
+            await callback.answer("⏳ Please wait for the Admin to approve and give you your second batch.", show_alert=True)
+            return
+            
+        next_allowed = None
+        required_batches = 4
+        
+        if step == 1:
+            next_allowed = last_work_time + timedelta(hours=4) if last_work_time else now
         elif step == 2:
-            next_allowed = last_work_time + timedelta(hours=6)
-            required_batches = 4
-            wait_hours = 8
-        else:
-            next_allowed = last_work_time + timedelta(hours=8)
-            required_batches = 4
-            wait_hours = 8
+            next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now
+        elif step > 2:
+            next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now
 
-        # Timing Bypass or enforcement
-        if next_allowed and now < next_allowed:
+        # Timer logic
+        if step > 0 and next_allowed and now < next_allowed:
             if is_admin:
                 await callback.answer("🛠️ Admin Bypass: Timer ignored for testing.", show_alert=False)
             else:
                 wait_time = next_allowed - now
                 hours, remainder = divmod(wait_time.total_seconds(), 3600)
                 minutes = remainder // 60
-                await callback.answer(f"⏳ Please try again after {int(hours)} hours and {int(minutes)} minutes.", show_alert=True)
+                
+                msg = f"⏳ Please wait {int(hours)} hours and {int(minutes)} minutes."
+                if not work_approved:
+                    msg += "\n\n⚠️ Tell Admin To Approve Your Pending Work."
+                    
+                await callback.answer(msg, show_alert=True)
                 return
+
+        # Time passed but work not approved yet
+        if step > 0 and not work_approved and not is_admin:
+            await callback.answer("⚠️ Your previous work has not been approved yet. Tell Admin To Approve Your Pending Work.", show_alert=True)
+            return
 
         # Fetch dump settings
         dump_settings = await settings_col.find_one({"_id": "dump_settings"})
@@ -667,17 +680,25 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         sent_batches = user.get("sent_batches", [])
         available_batches = [i for i in range(total_batches_available) if i not in sent_batches]
 
-        if len(available_batches) < required_batches:
+        actual_batches = 1 if step == 0 else required_batches
+
+        if len(available_batches) < actual_batches:
             await callback.answer("⚠️ Not enough new unique videos available in the Dump Channel. Please contact Admin.", show_alert=True)
             return
 
         await callback.answer("📥 Processing your work batch...")
-        await callback.message.answer(f"🚀 **New Work Assigned!**\nDelivering {required_batches} batches (6 videos each)...")
         
-        selected_batches = random.sample(available_batches, required_batches)
+        if step == 0:
+            await callback.message.answer("🚀 **First Batch Assigned!**\nDelivering your first 6 videos...")
+        else:
+            await callback.message.answer(f"🚀 **New Work Assigned!**\nDelivering {actual_batches} batches (6 videos each)...")
+        
+        selected_batches = random.sample(available_batches, actual_batches)
         
         for idx, batch_idx in enumerate(selected_batches, 1):
-            await callback.message.answer(f"📦 **Batch {idx}**")
+            if step > 0:
+                await callback.message.answer(f"📦 **Batch {idx}**")
+            
             start_msg_id = base_msg_id + (batch_idx * 6)
             success_count = 0
             
@@ -696,17 +717,42 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             if success_count == 0:
                 await callback.message.answer("⚠️ *Could not fetch videos for this batch.*", parse_mode="Markdown")
 
-        # Update DB
         sent_batches.extend(selected_batches)
-        await users_col.update_one(
-            {"user_id": callback.from_user.id},
-            {"$set": {
-                "last_work_time": now,
-                "sent_batches": sent_batches
-            }, "$inc": {"schedule_step": 1}}
-        )
-
-        await callback.message.answer("✅ **Work Delivered!**\n\nUpload on Instagram account, 6 videos each account, and submit work.")
+        
+        # Step logic mapping 
+        if step == 0:
+            await users_col.update_one(
+                {"user_id": callback.from_user.id},
+                {"$set": {
+                    "pending_second_batch": True,
+                    "sent_batches": sent_batches
+                }}
+            )
+            # Notify Admin for Second Batch approval
+            admin_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Approved And Give", callback_data=f"give_second_batch_{callback.from_user.id}")
+            ]])
+            if ADMIN_ID:
+                try:
+                    await bot.send_message(
+                        ADMIN_ID, 
+                        f"🔔 **User Requested 2nd Batch**\n\nUser {callback.from_user.first_name} (`{callback.from_user.id}`) just received their 1st batch and is waiting for the 2nd one.\n\nClick below to approve and send.",
+                        reply_markup=admin_kb
+                    )
+                except Exception:
+                    pass
+                    
+            await callback.message.answer("✅ **First Batch Delivered!**\n\nThe Admin has been notified to send your second batch. Please wait for their approval.")
+        else:
+            await users_col.update_one(
+                {"user_id": callback.from_user.id},
+                {"$set": {
+                    "last_work_time": now,
+                    "sent_batches": sent_batches,
+                    "work_approved": False
+                }, "$inc": {"schedule_step": 1}}
+            )
+            await callback.message.answer(f"✅ **Work Delivered!**\n\nUpload on Instagram account, 6 videos each account, and submit work.")
 
     except Exception as e:
         logger.error(f"Error in request_new_work: {e}")
@@ -779,7 +825,7 @@ async def process_work_views(message: Message, state: FSMContext) -> None:
             "timestamp": datetime.now()
         }
         
-        await message.reply("🎉 **Work submitted successfully!**\nAdmin will review your Unmarked work and update your payment.")
+        await message.reply("🎉 **Work submitted successfully!**\nAdmin will review your Unmarked work and update your payment. Once approved, you can receive your next work.")
         await state.clear()
         
         async def save_submission_bg():
@@ -881,7 +927,6 @@ async def admin_show_stats(callback: CallbackQuery) -> None:
         total_users = await users_col.count_documents({})
         active_users = await users_col.count_documents({"is_active": True})
         
-        # Joined Today Calculation
         today_start = datetime.combine(datetime.now().date(), datetime.min.time())
         joined_today = await users_col.count_documents({"join_date": {"$gte": today_start}})
         
@@ -923,7 +968,7 @@ async def admin_backup(callback: CallbackQuery, bot: Bot) -> None:
             "timestamp": datetime.now().isoformat(),
             "users": users,
             "dump_settings": dump_settings,
-            "info": "MongoDB Auto-Sync is ON. Local file is just for reference."
+            "info": "MongoDB Auto-Sync is ON. Data is safe even on VPS restart."
         }
         
         json_data = json.dumps(backup_data, indent=4).encode('utf-8')
@@ -932,14 +977,14 @@ async def admin_backup(callback: CallbackQuery, bot: Bot) -> None:
         await bot.send_document(
             callback.from_user.id, 
             document=file, 
-            caption="💾 **Database Backup Generated!**\n\n*Note:* Since your bot uses MongoDB, data is natively persistent.",
+            caption="💾 **Database Backup Generated!**\n\n*Note:* Data automatically syncs via MongoDB, no VPS files will be lost.",
             parse_mode="Markdown"
         )
     except Exception as e:
         logger.error(f"Error generating backup: {e}")
         await callback.answer("⚠️ Failed to generate backup.", show_alert=True)
 
-# --- DP STORAGE (JSON + MONGODB TEXT) ---
+# --- DP STORAGE (JSON IN MONGO + TEXTS IN MONGO) ---
 
 @router.callback_query(F.data == "admin_dp_storage_menu")
 async def dp_storage_menu(callback: CallbackQuery) -> None:
@@ -950,7 +995,7 @@ async def dp_storage_menu(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="📁 Step 3", callback_data="dp_view_step3"), InlineKeyboardButton(text="📁 Step 4", callback_data="dp_view_step4")],
             [InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]
         ])
-        await callback.message.edit_text("🖼️ **DP Storage (Steps)**\n\nLocal storage for Media + MongoDB for Texts. Select a step:", reply_markup=kb)
+        await callback.message.edit_text("🖼️ **DP Storage (Steps)**\n\nStorage completely synced in Database. Select a step:", reply_markup=kb)
     except Exception as e:
         logger.error(f"Error in dp_storage_menu: {e}")
 
@@ -960,7 +1005,7 @@ async def view_dp_step(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         step = callback.data.split("_")[-1]
         
-        media_data = load_media()
+        media_data = await load_media()
         media_items = media_data.get("dp_storage", {}).get(step, [])
         text_items = await dp_texts_col.count_documents({"step": step})
         
@@ -988,7 +1033,7 @@ async def add_dp_step_media(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.edit_text(
             f"📤 **Adding to {step.capitalize()}**\n\n"
             f"👉 Please send a Photo, Video, or Text message.\n"
-            f"*(Note: Texts and links will be saved in MongoDB. Photos and Videos will be saved on Local Server)*", 
+            f"*(Everything is safely stored inside Database for persistence)*", 
             reply_markup=kb
         )
     except Exception as e:
@@ -1022,26 +1067,23 @@ async def receive_dp_storage_media(message: Message, state: FSMContext) -> None:
             return
 
         if is_text:
-            # TEXT -> MONGODB
             await dp_texts_col.insert_one({
                 "step": step,
                 "text": file_id,
                 "timestamp": datetime.now()
             })
-            save_msg = f"✅ Text saved to MongoDB under **{step.capitalize()}**!"
+            save_msg = f"✅ Text saved to DB under **{step.capitalize()}**!"
         else:
-            # MEDIA -> LOCAL JSON
-            media_data = load_media()
+            media_data = await load_media()
             media_data["dp_storage"][step].append({"type": media_type, "content": file_id})
-            save_media(media_data)
-            save_msg = f"✅ Media saved locally under **{step.capitalize()}**!"
+            await save_media(media_data)
+            save_msg = f"✅ Media ID saved to DB under **{step.capitalize()}**!"
 
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Step Menu", callback_data=f"dp_view_{step}")]])
         await message.reply(f"{save_msg}\n\nYou can keep sending more data to save, or go back.", reply_markup=kb)
     except Exception as e:
         logger.error(f"Error in receive_dp_storage_media: {e}")
 
-# API LIMIT PREVENTED: PAGINATION ADDED
 @router.callback_query(F.data.startswith("dp_show_"))
 async def show_dp_step_media_paginated(callback: CallbackQuery, bot: Bot) -> None:
     try:
@@ -1050,7 +1092,7 @@ async def show_dp_step_media_paginated(callback: CallbackQuery, bot: Bot) -> Non
         step = parts[2]
         page = int(parts[3]) if len(parts) > 3 else 0
         
-        media_data = load_media()
+        media_data = await load_media()
         media_items = media_data.get("dp_storage", {}).get(step, [])
         text_docs = await dp_texts_col.find({"step": step}).sort("timestamp", 1).to_list(length=None)
         
@@ -1083,7 +1125,6 @@ async def show_dp_step_media_paginated(callback: CallbackQuery, bot: Bot) -> Non
                 logger.warning(f"Failed to send {m_type} from storage: {ex}")
             await asyncio.sleep(0.3)
             
-        # Pagination Menu
         nav_kb = InlineKeyboardBuilder()
         nav_row = []
         if page > 0:
@@ -1105,15 +1146,13 @@ async def clear_dp_step(callback: CallbackQuery) -> None:
     try:
         step = callback.data.split("_")[-1]
         
-        # Clear Local
-        media_data = load_media()
+        media_data = await load_media()
         media_data["dp_storage"][step] = []
-        save_media(media_data)
+        await save_media(media_data)
         
-        # Clear MongoDB Texts
         await dp_texts_col.delete_many({"step": step})
         
-        await callback.answer(f"✅ {step.capitalize()} cleared successfully (Local + MongoDB)!", show_alert=True)
+        await callback.answer(f"✅ {step.capitalize()} cleared successfully!", show_alert=True)
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="➕ Add", callback_data=f"dp_add_{step}"), InlineKeyboardButton(text="👁️ View All", callback_data=f"dp_show_{step}_0")],
@@ -1130,7 +1169,7 @@ async def clear_dp_step(callback: CallbackQuery) -> None:
 async def dp_bank_menu(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
-        media_data = load_media()
+        media_data = await load_media()
         items = media_data.get("dp_bank", [])
         
         text = f"🏦 **DP Bank**\nTotal Photos: `{len(items)}`\n\nManage your massive collection of DPs:"
@@ -1150,7 +1189,7 @@ async def add_dpbank_photo(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         await state.set_state(AdminStates.waiting_for_dp_bank_media)
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="admin_dp_bank_menu")]])
-        await callback.message.edit_text("📤 **Adding to DP Bank**\n\nPlease send a **Photo** to store it locally in the bank:", reply_markup=kb)
+        await callback.message.edit_text("📤 **Adding to DP Bank**\n\nPlease send a **Photo** to store it safely in the DB:", reply_markup=kb)
     except Exception as e:
         logger.error(f"Error in add_dpbank_photo: {e}")
 
@@ -1162,12 +1201,12 @@ async def receive_dp_bank_photo(message: Message, state: FSMContext) -> None:
             return
 
         file_id = message.photo[-1].file_id
-        media_data = load_media()
+        media_data = await load_media()
         media_data["dp_bank"].append(file_id)
-        save_media(media_data)
+        await save_media(media_data)
 
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to DP Bank", callback_data="admin_dp_bank_menu")]])
-        await message.reply("✅ Photo saved to DP Bank!\n\nYou can keep sending more photos to fill the bank.", reply_markup=kb)
+        await message.reply("✅ Photo ID saved to DB DP Bank!\n\nYou can keep sending more photos.", reply_markup=kb)
     except Exception as e:
         logger.error(f"Error in receive_dp_bank_photo: {e}")
 
@@ -1175,7 +1214,7 @@ async def receive_dp_bank_photo(message: Message, state: FSMContext) -> None:
 async def show_dpbank_random(callback: CallbackQuery, bot: Bot) -> None:
     try:
         await callback.answer()
-        media_data = load_media()
+        media_data = await load_media()
         items = media_data.get("dp_bank", [])
         
         if not items:
@@ -1188,7 +1227,6 @@ async def show_dpbank_random(callback: CallbackQuery, bot: Bot) -> None:
     except Exception as e:
         logger.error(f"Error in show_dpbank_random: {e}")
 
-# API LIMIT PREVENTED: PAGINATION ADDED
 @router.callback_query(F.data.startswith("dpbank_viewall_"))
 async def show_dpbank_all_paginated(callback: CallbackQuery, bot: Bot) -> None:
     try:
@@ -1196,7 +1234,7 @@ async def show_dpbank_all_paginated(callback: CallbackQuery, bot: Bot) -> None:
         parts = callback.data.split("_")
         page = int(parts[2]) if len(parts) > 2 else 0
         
-        media_data = load_media()
+        media_data = await load_media()
         items = media_data.get("dp_bank", [])
         
         if not items:
@@ -1237,9 +1275,9 @@ async def show_dpbank_all_paginated(callback: CallbackQuery, bot: Bot) -> None:
 @router.callback_query(F.data == "dpbank_clear")
 async def clear_dpbank(callback: CallbackQuery) -> None:
     try:
-        media_data = load_media()
+        media_data = await load_media()
         media_data["dp_bank"] = []
-        save_media(media_data)
+        await save_media(media_data)
         await callback.answer("✅ DP Bank cleared successfully!", show_alert=True)
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1345,6 +1383,7 @@ async def admin_set_dump_total_videos(message: Message, state: FSMContext) -> No
     except Exception as e:
         logger.error(f"Error in admin_set_dump_total_videos: {e}")
 
+
 # --- UNMARKED & MARKED SUBMISSIONS LOGIC ---
 
 @router.callback_query(F.data == "admin_unmarked_subs")
@@ -1438,7 +1477,6 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
         
         sub_id = str(sub["_id"])
         
-        # ADDED: SKIP PAYMENT BUTTON
         action_kb = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ Accept", callback_data=f"accept_sub_{sub_id}"),
@@ -1502,7 +1540,7 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
     except Exception as e:
         logger.error(f"Error opening marked submission: {e}")
 
-# ADDED: SKIP SUB LOGIC 
+# UPGRADE: Added "work_approved" setting so user can proceed to next step
 @router.callback_query(F.data.startswith("skip_sub_"))
 async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
     try:
@@ -1518,8 +1556,11 @@ async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
         
         await submissions_col.update_one({"_id": ObjectId(sub_id)}, {"$set": {"status": "accepted"}})
         
+        # Approve work status
+        await users_col.update_one({"user_id": user_id}, {"$set": {"work_approved": True}})
+        
         try:
-            await bot.send_message(user_id, "🎉 **Work Accepted!**\n\nYour recent work submission was successfully approved (No Balance Added).")
+            await bot.send_message(user_id, "🎉 **Work Accepted!**\n\nYour recent work submission was successfully approved (No Balance Added). You can now request your next batch.")
         except Exception:
             pass
             
@@ -1587,8 +1628,9 @@ async def process_submission_balance(message: Message, state: FSMContext, bot: B
             if sub_id:
                 await submissions_col.update_one({"_id": ObjectId(sub_id)}, {"$set": {"status": "accepted"}})
             if target_id and amount > 0:
-                await users_col.update_one({"user_id": target_id}, {"$inc": {"balance": amount}})
-                notify_text = f"🎉 **Work Accepted!**\n\nYour recent work submission was approved.\n💰 **Balance Added:** ₹{amount}"
+                # Upgraded to set work_approved = True
+                await users_col.update_one({"user_id": target_id}, {"$set": {"work_approved": True}, "$inc": {"balance": amount}})
+                notify_text = f"🎉 **Work Accepted!**\n\nYour recent work submission was approved. You can now request next work.\n💰 **Balance Added:** ₹{amount}"
                 try:
                     await bot.send_message(target_id, notify_text)
                 except Exception as e:
@@ -1661,6 +1703,81 @@ async def process_deny_reason(message: Message, state: FSMContext, bot: Bot) -> 
         await state.clear()
 
 
+# --- UPGRADE: GIVE SECOND BATCH LOGIC ---
+@router.callback_query(F.data.startswith("give_second_batch_"))
+async def admin_give_second_batch(callback: CallbackQuery, bot: Bot) -> None:
+    try:
+        user_id = int(callback.data.split("_")[-1])
+        user = await get_user(user_id)
+        
+        if not user or not user.get("pending_second_batch"):
+            await callback.answer("⚠️ User has already received the second batch or is not waiting for it.", show_alert=True)
+            return
+
+        dump_settings = await settings_col.find_one({"_id": "dump_settings"})
+        if not dump_settings:
+            await callback.answer("⚠️ Dump Channel not set by Admin yet.", show_alert=True)
+            return
+
+        chat_id = dump_settings.get("chat_id")
+        base_msg_id = dump_settings.get("base_msg_id")
+        total_videos = dump_settings.get("total_videos", 0)
+        total_batches_available = total_videos // 6
+        sent_batches = user.get("sent_batches", [])
+        
+        available_batches = [i for i in range(total_batches_available) if i not in sent_batches]
+        
+        if not available_batches:
+            await callback.answer("⚠️ No new videos available in dump channel.", show_alert=True)
+            return
+
+        await callback.answer("📤 Sending Second Batch to user...")
+        batch_idx = random.choice(available_batches)
+        start_msg_id = base_msg_id + (batch_idx * 6)
+        
+        try:
+            await bot.send_message(user_id, "🚀 **Second Batch Approved!**\n\nAdmin has approved your first batch. Delivering your second batch (6 videos) now...")
+        except Exception:
+            pass
+            
+        success_count = 0
+        for i in range(6):
+            try:
+                await bot.copy_message(
+                    chat_id=user_id,
+                    from_chat_id=chat_id,
+                    message_id=start_msg_id + i
+                )
+                success_count += 1
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.warning(f"Failed to copy msg {start_msg_id + i} to {user_id}: {e}")
+
+        sent_batches.append(batch_idx)
+        
+        # Step incremented, pending removed, timer restarted, work_approved=True so they can ask next directly
+        await users_col.update_one(
+            {"user_id": user_id},
+            {"$set": {
+                "pending_second_batch": False,
+                "schedule_step": 1,
+                "last_work_time": datetime.now(),
+                "work_approved": True,
+                "sent_batches": sent_batches
+            }}
+        )
+        
+        try:
+            new_text = callback.message.text + "\n\n✅ **GIVEN SECOND BATCH**"
+            await callback.message.edit_text(new_text, reply_markup=None)
+        except Exception:
+            pass
+            
+    except Exception as e:
+        logger.error(f"Error giving second batch: {e}")
+        await callback.answer("An error occurred.", show_alert=True)
+
+
 @router.callback_query(F.data == "admin_add_user_panel")
 async def admin_add_user_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     try:
@@ -1727,7 +1844,10 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
                     "submission_count": 0,
                     "join_date": datetime.now(),
                     "schedule_step": 0,
-                    "sent_batches": []
+                    "sent_batches": [],
+                    "pending_second_batch": False, 
+                    "work_approved": True, 
+                    "last_work_time": None
                 })
             asyncio.create_task(insert_new_user())
             
@@ -1917,7 +2037,6 @@ async def prompt_upd_bal(callback: CallbackQuery, state: FSMContext) -> None:
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"manage_user_{uid}")]])
     await callback.message.edit_text("👉 Enter the NEW exact balance amount to OVERRIDE for this user:", reply_markup=kb)
 
-# PERMANENT MESSAGES FOR BALANCE/BROADCAST ADDED 
 @router.message(AdminStates.waiting_for_add_balance_amount)
 async def execute_add_bal(message: Message, state: FSMContext, bot: Bot) -> None:
     try:
@@ -2129,7 +2248,6 @@ async def execute_bcast_msg(message: Message, state: FSMContext, bot: Bot) -> No
             except Exception:
                 pass
                 
-        # This makes the success message persistent, it does not delete anything else.
         await processing_msg.delete()
         await message.reply(f"✅ Broadcast complete! Successfully sent to {sent_count} users.", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
