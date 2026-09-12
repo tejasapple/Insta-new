@@ -127,7 +127,7 @@ async def safe_edit_message(callback: CallbackQuery, text: str, reply_markup: In
             logger.error(f"Safe edit failed: {e}")
 
 # ==========================================
-# MAINTENANCE MIDDLEWARE
+# MAINTENANCE & BAN MIDDLEWARE
 # ==========================================
 class MaintenanceMiddleware(BaseMiddleware):
     async def __call__(
@@ -138,6 +138,15 @@ class MaintenanceMiddleware(BaseMiddleware):
     ) -> Any:
         user = data.get("event_from_user")
         if user:
+            # Check if user is permanently banned
+            user_doc = await users_col.find_one({"user_id": user.id})
+            if user_doc and user_doc.get("is_banned", False):
+                if isinstance(event, Message):
+                    await event.answer("🚫 **Access Denied**\n\nYou have been permanently banned from using this bot.", parse_mode="Markdown")
+                elif isinstance(event, CallbackQuery):
+                    await event.answer("🚫 You are permanently banned.", show_alert=True)
+                return
+
             status_doc = await settings_col.find_one({"_id": "system_status"})
             is_maintenance = status_doc.get("maintenance_mode", False) if status_doc else False
             
@@ -193,16 +202,16 @@ async def get_daily_withdrawals() -> Tuple[List[Dict[str, Any]], int, int]:
     today = datetime.now().date()
     random.seed(today.toordinal())
     
+    # 100% Ensure NO Real Users ever go in payout list
     real_users_cursor = users_col.find({"is_active": True})
-    real_users = await real_users_cursor.to_list(length=1000)
+    real_users = await real_users_cursor.to_list(length=5000)
     real_names = {str(u.get("first_name", "")).strip().lower() for u in real_users}
     
     available_names = [n for n in FAKE_NAMES if n.strip().lower() not in real_names]
-    if len(available_names) < 20:
-        available_names = FAKE_NAMES
-        
+    
+    # Strictly bound to fake names
     num_today = random.randint(15, 20)
-    selected_today = random.sample(available_names, num_today)
+    selected_today = random.sample(available_names, min(num_today, len(available_names)))
     
     withdrawals_today = []
     total_today = 0
@@ -223,7 +232,7 @@ async def get_daily_withdrawals() -> Tuple[List[Dict[str, Any]], int, int]:
         past_date = today - timedelta(days=i)
         random.seed(past_date.toordinal())
         num_past = random.randint(15, 20)
-        selected_past = random.sample(available_names, num_past)
+        selected_past = random.sample(available_names, min(num_past, len(available_names)))
         for _ in selected_past:
             total_7days += random.randint(3, 10) * 1000
             
@@ -271,6 +280,7 @@ async def register_user_if_not_exists(user_id: int, username: str, first_name: s
             "username": username,
             "first_name": first_name,
             "is_active": False,
+            "is_banned": False, # BAN FEATURE ADDED
             "balance": 0,
             "submission_count": 0,
             "join_date": datetime.now(),
@@ -279,7 +289,8 @@ async def register_user_if_not_exists(user_id: int, username: str, first_name: s
             "sent_batches": [],
             "pending_second_batch": False, 
             "work_approved": True, 
-            "last_work_time": None
+            "last_work_time": None,
+            "notified_new_work": False # NOTIFICATION FLAG ADDED
         })
     except Exception as e:
         logger.error(f"Error registering user {user_id}: {e}")
@@ -307,12 +318,17 @@ class WorkSubmission(StatesGroup):
     waiting_for_photo1 = State()
     waiting_for_photo2 = State()
 
+class WithdrawStates(StatesGroup):
+    waiting_for_upi = State()
+    waiting_for_crypto = State()
+
 class AdminStates(StatesGroup):
     waiting_for_work_link = State()
     waiting_for_proof_link = State()
     waiting_for_user_query = State()
     waiting_for_add_user = State()
     waiting_for_submission_balance = State()
+    waiting_for_all_submission_balance = State() # Check All & Payment state
     waiting_for_deny_reason = State()
     waiting_for_add_balance_amount = State()
     waiting_for_remove_balance_amount = State()
@@ -492,11 +508,13 @@ async def show_active_members(callback: CallbackQuery) -> None:
         
         for month, names in FAKE_MEMBERS_BY_MONTH.items():
             if month == "September 2026":
-                total_sept = len(names) + len(real_users)
+                # Real users replace Fake users so total count remains balanced
+                real_names = [u.get("first_name", "User") for u in real_users]
+                fake_count = max(0, len(names) - len(real_names))
+                combined_names = names[:fake_count] + real_names
+                total_sept = len(combined_names)
+                
                 text += f"📅 **{month} (Total: {total_sept} Members)**\n"
-                combined_names = names.copy()
-                for u in real_users:
-                    combined_names.append(u.get("first_name", "User"))
                 text += ", ".join(combined_names) + "\n\n"
             else:
                 text += f"📅 **{month} ({len(names)} Members)**\n"
@@ -545,30 +563,8 @@ async def show_balance(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "request_withdraw")
 async def request_withdrawal(callback: CallbackQuery) -> None:
     try:
-        user = await get_user(callback.from_user.id)
-        
-        if not user or not user.get("is_active"):
-            await callback.answer("Access Denied! This is for only our staff.", show_alert=True)
-            return
-            
-        approval_date = user.get("approval_date")
-        if not approval_date:
-            approval_date = user.get("join_date")
-            
-        delta = datetime.now() - approval_date
-        total_seconds = (timedelta(days=3) - delta).total_seconds()
-        
-        if total_seconds > 0:
-            days_left = int(total_seconds // 86400)
-            hours_left = int((total_seconds % 86400) // 3600)
-            if days_left > 0:
-                time_str = f"{days_left} Days left"
-            else:
-                time_str = f"{hours_left} Hours left"
-                
-            await callback.answer(f"⏳ You need to wait 3 days after joining to withdraw.\n\nTime remaining: {time_str}", show_alert=True)
-            return
-
+        # Changed: Allow user inside UPI/Crypto regardless of 96hrs completion
+        # Let them enter details, then reject if not met criteria.
         await callback.answer()
         text = (
             "💵 **Exchange Rate: $1 = ₹93 INR**\n\n"
@@ -587,24 +583,80 @@ async def request_withdrawal(callback: CallbackQuery) -> None:
         logger.error(f"Error in request_withdraw: {e}")
 
 @router.callback_query(F.data.startswith("withdraw_method_"))
-async def handle_withdraw_method(callback: CallbackQuery) -> None:
+async def handle_withdraw_method(callback: CallbackQuery, state: FSMContext) -> None:
     try:
-        user = await get_user(callback.from_user.id)
-        
-        if not user or not user.get("is_active"):
-            await callback.answer("Access Denied! This is for only our staff.", show_alert=True)
-            return
-            
-        balance = user.get("balance", 0)
-        if balance < 3000:
-            await callback.answer(f"Minimum withdrawal is ₹3000, you have only ₹{balance}", show_alert=True)
-            return
-            
         method = callback.data.split("_")[-1].upper()
-        await callback.answer(f"✅ Your {method} withdrawal request is eligible! Please contact Admin.", show_alert=True)
         
+        if method == "UPI":
+            await state.set_state(WithdrawStates.waiting_for_upi)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="request_withdraw")]])
+            await safe_edit_message(callback, "🏦 **UPI Withdrawal**\n\n👉 Please Add UPI ID below:", kb)
+            
+        elif method == "CRYPTO":
+            await state.set_state(WithdrawStates.waiting_for_crypto)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="request_withdraw")]])
+            await safe_edit_message(callback, "🪙 **Crypto Withdrawal**\n\n👉 Please Add Address and Select Currency below:", kb)
+
     except Exception as e:
         logger.error(f"Error in withdraw method processing: {e}")
+
+# Validator function for withdrawals
+async def validate_withdrawal(message: Message, state: FSMContext):
+    user = await get_user(message.from_user.id)
+    
+    if not user or not user.get("is_active"):
+        await message.reply("🚫 Access Denied! This feature is only for our verified staff.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Main Menu", callback_data="back_to_menu")]]))
+        await state.clear()
+        return
+
+    approval_date = user.get("approval_date")
+    if not approval_date:
+        approval_date = user.get("join_date")
+        
+    delta = datetime.now() - approval_date
+    total_seconds = (timedelta(hours=96) - delta).total_seconds()
+    
+    if total_seconds > 0:
+        days_left = int(total_seconds // 86400)
+        hours_left = int((total_seconds % 86400) // 3600)
+        time_str = f"{days_left} Days and {hours_left} Hours" if days_left > 0 else f"{hours_left} Hours"
+        
+        await message.reply(
+            f"⏳ **You have not completed 96 hours yet.**\n\nYou need to wait 96 hours after joining to withdraw.\nTime remaining: {time_str}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="request_withdraw")]])
+        )
+        await state.clear()
+        return
+
+    balance = user.get("balance", 0)
+    if balance < 3000:
+        await message.reply(
+            f"⚠️ **3k minimum withdrawal required.**\n\nYour current balance is only ₹{balance}. You need at least ₹3,000 to place a request.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="request_withdraw")]])
+        )
+        await state.clear()
+        return
+
+    # If completely valid (Admin testing, etc)
+    await message.reply("✅ Your withdrawal request has been submitted to Admin! Processing takes 24-48 hours.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Main Menu", callback_data="back_to_menu")]]))
+    await state.clear()
+
+@router.message(WithdrawStates.waiting_for_upi)
+async def process_withdraw_upi(message: Message, state: FSMContext) -> None:
+    try:
+        # Check constraints after they add UPI ID
+        await validate_withdrawal(message, state)
+    except Exception as e:
+        logger.error(f"Error in process_withdraw_upi: {e}")
+
+@router.message(WithdrawStates.waiting_for_crypto)
+async def process_withdraw_crypto(message: Message, state: FSMContext) -> None:
+    try:
+        # Check constraints after they add Crypto Address
+        await validate_withdrawal(message, state)
+    except Exception as e:
+        logger.error(f"Error in process_withdraw_crypto: {e}")
+
 
 # ==========================================
 # STAFF WORK & SUBMISSION FLOW (FSM)
@@ -724,7 +776,8 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
                 "last_work_time": now,
                 "sent_batches": sent_batches,
                 "work_approved": False,
-                "pending_second_batch": False 
+                "pending_second_batch": False,
+                "notified_new_work": False # Reset notification since they took work
             }, "$inc": {"schedule_step": 1}}
         )
         
@@ -960,8 +1013,7 @@ async def admin_backup(callback: CallbackQuery, bot: Bot) -> None:
         logger.error(f"Error generating backup: {e}")
         await callback.answer("⚠️ Failed to generate backup.", show_alert=True)
 
-# --- DP STORAGE (JSON IN MONGO + TEXTS IN MONGO) ---
-
+# --- DP STORAGE LOGIC ---
 @router.callback_query(F.data == "admin_dp_storage_menu")
 async def dp_storage_menu(callback: CallbackQuery) -> None:
     try:
@@ -1140,7 +1192,6 @@ async def clear_dp_step(callback: CallbackQuery) -> None:
         logger.error(f"Error in clear_dp_step: {e}")
 
 # --- DP BANK MENUS (PAGINATED) ---
-
 @router.callback_query(F.data == "admin_dp_bank_menu")
 async def dp_bank_menu(callback: CallbackQuery) -> None:
     try:
@@ -1268,7 +1319,6 @@ async def clear_dpbank(callback: CallbackQuery) -> None:
 
 
 # --- SINGLE DUMP CHANNEL LOGIC ---
-
 @router.callback_query(F.data == "admin_set_dump_channel")
 async def admin_set_dump_channel_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     try:
@@ -1361,7 +1411,6 @@ async def admin_set_dump_total_videos(message: Message, state: FSMContext) -> No
 
 
 # --- PAGINATED UNMARKED & MARKED SUBMISSIONS LOGIC ---
-
 @router.callback_query(F.data.startswith("admin_unmarked_subs_"))
 async def admin_unmarked_subs(callback: CallbackQuery) -> None:
     try:
@@ -1401,7 +1450,6 @@ async def admin_unmarked_subs(callback: CallbackQuery) -> None:
             
         kb = InlineKeyboardBuilder()
         for s in grouped_subs:
-            # We initialize skip to 0 here for the check next logic
             kb.button(text=f"📄 {s['user_name']} ({s['count']} unmarked)", callback_data=f"view_unmarked_{s['_id']}_0")
         
         nav_row = []
@@ -1479,8 +1527,7 @@ async def admin_marked_subs(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error(f"Error in admin_marked_subs: {e}")
 
-# --- CHECK NEXT IMPLEMENTATION (PAGINATED VIEW INSIDE A SPECIFIC USER WITH DOUBLE PHOTOS) ---
-
+# --- CHECK NEXT IMPLEMENTATION & CHECK ALL PAYMENT ---
 @router.callback_query(F.data.startswith("view_unmarked_"))
 async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
     try:
@@ -1535,6 +1582,9 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
         )
         action_kb.row(InlineKeyboardButton(text="❌ Deny", callback_data=f"deny_sub_{sub_id}"))
         
+        # NEW CHECK ALL AND PAYMENT BUTTON
+        action_kb.row(InlineKeyboardButton(text="✅ Check All & Payment", callback_data=f"accept_all_{user_id}"))
+        
         nav_row = []
         if total_pending > 1:
             prev_skip = skip - 1 if skip > 0 else total_pending - 1
@@ -1557,11 +1607,10 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
             if photo1_id and photo2_id:
                 await bot.send_photo(chat_id=callback.from_user.id, photo=photo1_id, caption=caption1, parse_mode="Markdown")
                 await bot.send_photo(chat_id=callback.from_user.id, photo=photo2_id, caption=caption2, reply_markup=action_kb.as_markup(), parse_mode="Markdown")
-            else: # Fallback for old 1-photo logic if remaining
+            else: 
                 photo_id = sub.get("photo_id")
-                v = clean_md(str(sub.get('views', 'N/A')))
                 if photo_id:
-                    cap = f"{caption1}\n🔗 **Second Profile:** {l2}\n👁️ **Views:** {v}"
+                    cap = f"{caption1}\n🔗 **Second Profile:** {l2}"
                     await bot.send_photo(chat_id=callback.from_user.id, photo=photo_id, caption=cap, reply_markup=action_kb.as_markup(), parse_mode="Markdown")
                 else:
                     await bot.send_message(chat_id=callback.from_user.id, text=f"{caption1}\n{caption2}", reply_markup=action_kb.as_markup(), parse_mode="Markdown")
@@ -1570,6 +1619,75 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
             await callback.answer("⚠️ Failed to display submission. Check logs.", show_alert=True)
     except Exception as e:
         logger.error(f"Error opening unmarked submission: {e}")
+
+# --- ACCEPT ALL & PAYMENT (NEW FEATURE) ---
+@router.callback_query(F.data.startswith("accept_all_"))
+async def admin_accept_all_sub(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await callback.answer("Enter total balance to add.") 
+        user_id = int(callback.data.split("_")[-1])
+        
+        await state.set_state(AdminStates.waiting_for_all_submission_balance)
+        await state.update_data(target_user_id=user_id)
+        
+        prompt_text = "\n\n✅ **STATUS: CHECK ALL & PAYMENT**\n\n👉 **Type the TOTAL balance to add for ALL pending work:**"
+        
+        try:
+            if callback.message.caption:
+                await callback.message.edit_caption(
+                    caption=callback.message.caption + prompt_text,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel & Back", callback_data=f"view_unmarked_{user_id}_0")]])
+                )
+            else:
+                await callback.message.edit_text(
+                    text=callback.message.text + prompt_text,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel & Back", callback_data=f"view_unmarked_{user_id}_0")]])
+                )
+        except TelegramBadRequest:
+            pass
+    except Exception as e:
+        logger.error(f"Error in accept_all_sub: {e}")
+
+@router.message(AdminStates.waiting_for_all_submission_balance)
+async def process_all_submission_balance(message: Message, state: FSMContext, bot: Bot) -> None:
+    try:
+        if not message.text:
+            await message.reply("⚠️ Please enter a valid numerical amount.")
+            return
+        
+        try:
+            amount = int(message.text.strip())
+        except ValueError:
+            await message.reply("⚠️ Please enter a valid number (e.g., 500).")
+            return
+                
+        data = await state.get_data()
+        target_id = data.get("target_user_id")
+        
+        if target_id and amount >= 0:
+            await submissions_col.update_many({"user_id": target_id, "status": "pending"}, {"$set": {"status": "accepted"}})
+            await users_col.update_one({"user_id": target_id}, {"$set": {"work_approved": True}, "$inc": {"balance": amount}})
+            
+            async def notify_user():
+                notify_text = f"🎉 **Your all work is successfully processed!**\n\n💰 **Balance Added:** ₹{amount}\n\nYou can now request your next batch."
+                try:
+                    await bot.send_message(target_id, notify_text)
+                except Exception as e:
+                    logger.error(f"Could not notify user {target_id}: {e}")
+            asyncio.create_task(notify_user())
+            
+        await state.clear()
+        
+        kb = InlineKeyboardBuilder()
+        kb.row(InlineKeyboardButton(text="« Back to List", callback_data="admin_unmarked_subs_0"))
+        kb.row(InlineKeyboardButton(text="🏠 Main Menu", callback_data="open_admin_panel"))
+
+        await message.reply(f"✅ Successfully checked ALL work and added ₹{amount} to User `{target_id}`'s balance.", parse_mode="Markdown", reply_markup=kb.as_markup())
+        
+    except Exception as e:
+        logger.error(f"Error adding all sub balance: {e}")
+        await state.clear()
+
 
 @router.callback_query(F.data.startswith("view_marked_"))
 async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
@@ -1667,7 +1785,6 @@ async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
         await submissions_col.update_one({"_id": ObjectId(sub_id)}, {"$set": {"status": "accepted"}})
         await users_col.update_one({"user_id": user_id}, {"$set": {"work_approved": True}})
         
-        # Notify user silently in background
         async def skip_bg():
             try:
                 await bot.send_message(user_id, "🎉 **Work Accepted!**\n\nYour recent work submission was successfully approved (No Balance Added). You can now request your next batch.")
@@ -1675,7 +1792,6 @@ async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
                 pass
         asyncio.create_task(skip_bg())
 
-        # Give Next Sub button instantly
         pending_left = await submissions_col.count_documents({"user_id": user_id, "status": "pending"})
         
         kb = InlineKeyboardBuilder()
@@ -1691,7 +1807,6 @@ async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
                 await callback.message.edit_text(text=callback.message.text + "\n\n" + success_text, reply_markup=kb.as_markup())
         except TelegramBadRequest:
             pass
-
     except Exception as e:
         logger.error(f"Error in skip_sub: {e}")
 
@@ -1848,83 +1963,7 @@ async def process_deny_reason(message: Message, state: FSMContext, bot: Bot) -> 
         logger.error(f"Error denying sub: {e}")
         await state.clear()
 
-@router.callback_query(F.data.startswith("give_second_batch_"))
-async def admin_give_second_batch(callback: CallbackQuery, bot: Bot) -> None:
-    try:
-        user_id = int(callback.data.split("_")[-1])
-        user = await get_user(user_id)
-        
-        if not user or not user.get("pending_second_batch"):
-            await callback.answer("⚠️ User has already received the second batch or is not waiting for it.", show_alert=True)
-            return
-
-        dump_settings = await settings_col.find_one({"_id": "dump_settings"})
-        if not dump_settings:
-            await callback.answer("⚠️ Dump Channel not set by Admin yet.", show_alert=True)
-            return
-
-        chat_id = dump_settings.get("chat_id")
-        base_msg_id = dump_settings.get("base_msg_id")
-        total_videos = dump_settings.get("total_videos", 0)
-        total_batches_available = total_videos // 6
-        sent_batches = user.get("sent_batches", [])
-        
-        available_batches = [i for i in range(total_batches_available) if i not in sent_batches]
-        
-        if not available_batches:
-            await callback.answer("⚠️ No new videos available in dump channel.", show_alert=True)
-            return
-
-        await callback.answer("📤 Sending Second Batch to user...")
-        
-        try:
-            new_text = callback.message.text + "\n\n✅ **GIVEN SECOND BATCH**"
-            await callback.message.edit_text(new_text, reply_markup=None)
-        except TelegramBadRequest:
-            pass
-
-        async def give_batch_bg():
-            batch_idx = random.choice(available_batches)
-            start_msg_id = base_msg_id + (batch_idx * 6)
-            
-            try:
-                await bot.send_message(user_id, "🚀 **Second Batch Approved!**\n\nAdmin has approved your first batch. Delivering your second batch (6 videos) now...")
-            except Exception:
-                pass
-                
-            success_count = 0
-            for i in range(6):
-                try:
-                    await bot.copy_message(
-                        chat_id=user_id,
-                        from_chat_id=chat_id,
-                        message_id=start_msg_id + i
-                    )
-                    success_count += 1
-                    await asyncio.sleep(0.3)
-                except Exception as e:
-                    logger.warning(f"Failed to copy msg {start_msg_id + i} to {user_id}: {e}")
-
-            sent_batches.append(batch_idx)
-            
-            await users_col.update_one(
-                {"user_id": user_id},
-                {"$set": {
-                    "pending_second_batch": False,
-                    "schedule_step": 1,
-                    "last_work_time": datetime.now(),
-                    "work_approved": True,
-                    "sent_batches": sent_batches
-                }}
-            )
-            
-        asyncio.create_task(give_batch_bg())
-            
-    except Exception as e:
-        logger.error(f"Error giving second batch: {e}")
-        await callback.answer("An error occurred.", show_alert=True)
-
-
+# --- MANAGE USERS, REMOVE USER, BAN USER ---
 @router.callback_query(F.data == "admin_add_user_panel")
 async def admin_add_user_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     try:
@@ -1952,7 +1991,6 @@ async def admin_add_user_save(message: Message, state: FSMContext, bot: Bot) -> 
         name = ""
         query = ""
         
-        # Check if the message is a forwarded message from a user
         if message.forward_origin:
             if message.forward_origin.type == "user":
                 user_id = message.forward_origin.sender_user.id
@@ -1993,7 +2031,7 @@ async def admin_add_user_save(message: Message, state: FSMContext, bot: Bot) -> 
             async def update_existing_user():
                 await users_col.update_one(
                     {"_id": user["_id"]}, 
-                    {"$set": {"is_active": True, "approval_date": datetime.now()}}
+                    {"$set": {"is_active": True, "is_banned": False, "approval_date": datetime.now()}}
                 )
                 try:
                     await bot.send_message(user["user_id"], "🎉 **You have successfully applied and we have successfully approved you for our staff joining!**\n\nPlease use /start, go on **Staff Only** and submit your work.", parse_mode="Markdown")
@@ -2001,7 +2039,6 @@ async def admin_add_user_save(message: Message, state: FSMContext, bot: Bot) -> 
                     pass
             asyncio.create_task(update_existing_user())
         else:
-            # New Pre-approval creation
             new_user_id = user_id if user_id else (int(query) if is_digit else 0)
             new_username = username if username else (query if not is_digit else "")
             new_name = name if name else query
@@ -2015,6 +2052,7 @@ async def admin_add_user_save(message: Message, state: FSMContext, bot: Bot) -> 
                     "username": new_username,
                     "first_name": new_name,
                     "is_active": True,
+                    "is_banned": False,
                     "approval_date": datetime.now(),
                     "balance": 0,
                     "submission_count": 0,
@@ -2023,7 +2061,8 @@ async def admin_add_user_save(message: Message, state: FSMContext, bot: Bot) -> 
                     "sent_batches": [],
                     "pending_second_batch": False, 
                     "work_approved": True, 
-                    "last_work_time": None
+                    "last_work_time": None,
+                    "notified_new_work": False
                 })
                 if new_user_id != 0:
                     try:
@@ -2073,7 +2112,7 @@ async def admin_check_user_result(message: Message, state: FSMContext) -> None:
             
         for u in users:
             join_date = u.get("join_date", datetime.now()).strftime("%Y-%m-%d")
-            status = "✅ Active" if u.get("is_active") else "🚫 Inactive"
+            status = "✅ Active" if u.get("is_active") else ("🚫 Banned" if u.get("is_banned") else "⚪ Inactive")
             text = (
                 f"👤 **User Info:**\n\n"
                 f"**Name:** {u.get('first_name')}\n"
@@ -2175,6 +2214,7 @@ async def admin_manage_specific_user(callback: CallbackQuery) -> None:
             f"📥 **Total Work Submissions:** {subs_count}\n"
         )
         
+        # REMOVE USER AND BAN PERMANENT BUTTONS ADDED HERE
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="➕ Add Balance", callback_data=f"addbal_{uid}"),
@@ -2184,12 +2224,36 @@ async def admin_manage_specific_user(callback: CallbackQuery) -> None:
                 InlineKeyboardButton(text="🔄 Update Balance", callback_data=f"updbal_{uid}"),
                 InlineKeyboardButton(text="✉️ Send Message", callback_data=f"msguser_{uid}")
             ],
+            [
+                InlineKeyboardButton(text="🗑️ Remove User", callback_data=f"rmuser_{uid}"),
+                InlineKeyboardButton(text="🚫 Ban Permanent", callback_data=f"banuser_{uid}")
+            ],
             [InlineKeyboardButton(text="« Back", callback_data="admin_currently_users")]
         ])
         
         await safe_edit_message(callback, text, kb)
     except Exception as e:
         logger.error(f"Error in manage_user: {e}")
+
+@router.callback_query(F.data.startswith("rmuser_"))
+async def admin_remove_user(callback: CallbackQuery) -> None:
+    try:
+        uid = int(callback.data.split("_")[-1])
+        await users_col.update_one({"user_id": uid}, {"$set": {"is_active": False}})
+        await callback.answer("✅ User successfully removed from active staff!", show_alert=True)
+        await admin_currently_users(callback)
+    except Exception as e:
+        logger.error(f"Error removing user: {e}")
+
+@router.callback_query(F.data.startswith("banuser_"))
+async def admin_ban_user(callback: CallbackQuery) -> None:
+    try:
+        uid = int(callback.data.split("_")[-1])
+        await users_col.update_one({"user_id": uid}, {"$set": {"is_banned": True, "is_active": False}})
+        await callback.answer("🚫 User banned permanently!", show_alert=True)
+        await admin_currently_users(callback)
+    except Exception as e:
+        logger.error(f"Error banning user: {e}")
 
 @router.callback_query(F.data.startswith("addbal_"))
 async def prompt_add_bal(callback: CallbackQuery, state: FSMContext) -> None:
@@ -2587,165 +2651,47 @@ async def admin_close_panel(callback: CallbackQuery, state: FSMContext) -> None:
         logger.error(f"Error closing admin panel: {e}")
 
 # ==========================================
-# OLD ADMIN COMMANDS (PRESERVED)
+# SCHEDULED TASKS (NEW WORK NOTIFICATIONS)
 # ==========================================
-
-@router.message(Command("add_user"))
-async def admin_add_user(message: Message, bot: Bot) -> None:
+async def work_notification_job(bot: Bot) -> None:
+    """Checks for users who have completed their cooldown and notifies them."""
     try:
-        if not await is_admin_user(message.from_user.id):
-            return
-            
-        args = message.text.split(maxsplit=1)
-        if len(args) != 2:
-            await message.reply("Usage: `/add_user <user_id | @username | t.me/link | First Name>`\n\n*Tip: You can now use the Admin Panel to do this easily!*", parse_mode="Markdown")
-            return
-            
-        query = args[1].strip()
+        now = datetime.now()
+        # Find active, un-banned users who haven't been notified yet
+        users_cursor = users_col.find({"is_active": True, "is_banned": False, "notified_new_work": False})
+        users = await users_cursor.to_list(length=None)
         
-        if "t.me/" in query:
-            query = query.split("t.me/")[-1]
-        elif query.startswith("@"):
-            query = query[1:]
+        for u in users:
+            step = u.get("schedule_step", 0)
+            work_approved = u.get("work_approved", True)
+            approval_date = u.get("approval_date")
+            if not approval_date:
+                approval_date = u.get("join_date", now)
+                
+            last_work_time = u.get("last_work_time")
+            next_allowed = None
             
-        db_query = {}
-        if query.lstrip('-').isdigit():
-            db_query = {"user_id": int(query)}
-        else:
-            db_query = {"$or": [
-                {"username": {"$regex": f"^{query}$", "$options": "i"}},
-                {"first_name": {"$regex": f"^{query}$", "$options": "i"}}
-            ]}
+            if step == 0:
+                next_allowed = approval_date + timedelta(hours=4)
+            else:
+                if not work_approved:
+                    continue # Waiting for admin to approve pending work
+                next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now + timedelta(hours=6)
             
-        users = await users_col.find(db_query).to_list(5)
-        
-        if not users:
-            await message.reply(f"⚠️ No matching user found for `{query}`. You can add them through the Admin Panel to pre-approve them.", parse_mode="Markdown")
-            return
-            
-        if len(users) > 1:
-            names = [f"• {u.get('first_name')} (ID: `{u.get('user_id')}`)" for u in users]
-            await message.reply("⚠️ Multiple users found. Please use exact ID:\n" + "\n".join(names), parse_mode="Markdown")
-            return
-            
-        target_id = users[0]["user_id"]
-        result = await users_col.update_one(
-            {"user_id": target_id},
-            {"$set": {"is_active": True, "approval_date": datetime.now()}}
-        )
-        
-        if result.modified_count > 0:
-            await message.reply(f"✅ User **{users[0].get('first_name')}** (`{target_id}`) is now an ACTIVE member.", parse_mode="Markdown")
-            try:
-                await bot.send_message(target_id, "🎉 **You have successfully applied and we have successfully approved you for our staff joining!**\n\nPlease use /start, go on **Staff Only** and submit your work.", parse_mode="Markdown")
-            except Exception:
-                pass
-        else:
-            await message.reply("User is already active.")
-            
+            if next_allowed and now >= next_allowed:
+                uid = u["user_id"]
+                try:
+                    await bot.send_message(
+                        uid, 
+                        "🔔 **New Work Available!**\n\nYour limit is open. Download and post on Insta reels and submit work.",
+                        parse_mode="Markdown"
+                    )
+                    await users_col.update_one({"_id": u["_id"]}, {"$set": {"notified_new_work": True}})
+                except Exception as e:
+                    logger.error(f"Failed to notify user {uid}: {e}")
     except Exception as e:
-        logger.error(f"Error in add_user: {e}")
-        await message.reply("Error updating user. Check logs.")
+        logger.error(f"Error in work_notification_job: {e}")
 
-@router.message(Command("add_balance"))
-async def admin_add_balance(message: Message, bot: Bot) -> None:
-    try:
-        if not await is_admin_user(message.from_user.id):
-            return
-            
-        args = message.text.split()
-        if len(args) != 3:
-            await message.reply("Usage: `/add_balance <user_id> <amount>`", parse_mode="Markdown")
-            return
-            
-        target_id = int(args[1])
-        amount = int(args[2])
-        
-        result = await users_col.update_one(
-            {"user_id": target_id},
-            {"$inc": {"balance": amount}}
-        )
-        
-        if result.modified_count > 0:
-            await message.reply(f"✅ Successfully added ₹{amount} to User `{target_id}`'s balance. (Manual Update)", parse_mode="Markdown")
-            try:
-                await bot.send_message(target_id, f"🔔 **Balance Update!**\n\n✅ ₹{amount} has been added to your wallet by the Admin.")
-            except Exception:
-                pass
-        else:
-            await message.reply(f"⚠️ User `{target_id}` not found in DB.", parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Error in add_balance: {e}")
-        await message.reply("Error updating balance. Check logs.")
-
-@router.message(Command("set_work_link"))
-async def admin_set_work_link(message: Message) -> None:
-    try:
-        if not await is_admin_user(message.from_user.id):
-            return
-        args = message.text.split(maxsplit=1)
-        if len(args) != 2:
-            return await message.reply("Usage: `/set_work_link <https://...>`", parse_mode="Markdown")
-            
-        new_link = args[1].strip()
-        await settings_col.update_one(
-            {"_id": "global_links"},
-            {"$set": {"work_link": new_link}},
-            upsert=True
-        )
-        await message.reply(f"✅ 'Apply to Work' button link updated to: {new_link}")
-    except Exception as e:
-        logger.error(f"Error setting work link: {e}")
-
-@router.message(Command("set_proof_link"))
-async def admin_set_proof_link(message: Message) -> None:
-    try:
-        if not await is_admin_user(message.from_user.id):
-            return
-        args = message.text.split(maxsplit=1)
-        if len(args) != 2:
-            return await message.reply("Usage: `/set_proof_link <https://...>`", parse_mode="Markdown")
-            
-        new_link = args[1].strip()
-        await settings_col.update_one(
-            {"_id": "global_links"},
-            {"$set": {"proof_link": new_link}},
-            upsert=True
-        )
-        await message.reply(f"✅ 'Updates' button link updated to: {new_link}")
-    except Exception as e:
-        logger.error(f"Error setting proof link: {e}")
-
-@router.message(Command("submissions"))
-async def admin_view_submissions(message: Message) -> None:
-    try:
-        if not await is_admin_user(message.from_user.id):
-            return
-            
-        pipeline = [
-            {"$match": {"status": "pending"}},
-            {"$group": {
-                "_id": "$user_id",
-                "user_name": {"$first": "$user_name"},
-                "count": {"$sum": 1}
-            }}
-        ]
-        subs_cursor = submissions_col.aggregate(pipeline)
-        grouped_subs = await subs_cursor.to_list(length=50)
-        
-        if not grouped_subs:
-            await message.reply("✅ No pending work submissions.")
-            return
-            
-        kb = InlineKeyboardBuilder()
-        for s in grouped_subs:
-            kb.button(text=f"📄 {s['user_name']} ({s['count']} pending)", callback_data=f"view_user_subs_{s['_id']}")
-        
-        kb.adjust(1)
-        await message.reply("📋 **Pending Work Submissions:**\nClick on a user to view their submissions:", reply_markup=kb.as_markup())
-        
-    except Exception as e:
-        logger.error(f"Error loading submissions: {e}")
 
 # ==========================================
 # MAIN EXECUTION
@@ -2756,6 +2702,11 @@ async def main() -> None:
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
+    
+    # Scheduler Setup for the Notification Background Loop
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(work_notification_job, 'interval', minutes=5, args=[bot])
+    scheduler.start()
     
     try:
         await bot.delete_webhook(drop_pending_updates=True)
