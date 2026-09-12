@@ -1055,7 +1055,7 @@ async def receive_dp_storage_media(message: Message, state: FSMContext) -> None:
             await save_media(media_data)
             save_msg = f"✅ Media ID saved to DB under **{step.capitalize()}**!"
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"dp_view_{step}")]]))
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"dp_view_{step}")]])
         await message.reply(f"{save_msg}\n\nYou can keep sending more data to save, or go back.", reply_markup=kb)
     except Exception as e:
         logger.error(f"Error in receive_dp_storage_media: {e}")
