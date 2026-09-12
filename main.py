@@ -634,41 +634,35 @@ async def staff_only_menu(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "request_new_work")
 async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
     try:
-        await callback.answer("📥 Processing your work batch...")
+        await callback.answer("📥 Processing your work request...")
         user = await get_user(callback.from_user.id)
         if not user or not user.get("is_active"):
             await callback.answer("🚫 Access Denied! This is for only our staff.", show_alert=True)
             return
 
         step = user.get("schedule_step", 0)
-        pending_second = user.get("pending_second_batch", False)
         work_approved = user.get("work_approved", True)
         last_work_time = user.get("last_work_time")
+        approval_date = user.get("approval_date") or user.get("join_date", datetime.now())
         now = datetime.now()
         
-        if pending_second:
-            await callback.answer("⏳ Please wait for the Admin to approve and give you your second batch.", show_alert=True)
-            return
-            
-        next_allowed = None
-        required_batches = 4
-        
-        if step == 1:
-            next_allowed = last_work_time + timedelta(hours=4) if last_work_time else now
-        elif step == 2:
-            next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now
-        elif step > 2:
-            next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now
+        # New 4-hour cooldown logic for first work, 6-hour for next works
+        if step == 0:
+            next_allowed = approval_date + timedelta(hours=4)
+        else:
+            next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now + timedelta(hours=6)
 
-        # Strictly enforce the cooldown timer (admin bypass removed as per instructions)
-        if step > 0 and next_allowed and now < next_allowed:
+        if next_allowed and now < next_allowed:
             wait_time = next_allowed - now
-            hours = int(wait_time.total_seconds() // 3600)
-            if hours < 1:
-                hours = 1
+            hours, remainder = divmod(int(wait_time.total_seconds()), 3600)
+            minutes, _ = divmod(remainder, 60)
+            
+            if step == 0:
+                msg = f"⏳ {hours} hours and {minutes} minutes remaining!\n\nPlease retry after this time to get your new work and apply."
+            else:
+                msg = f"⏳ {hours} hours and {minutes} minutes remaining until your next batch."
                 
-            msg = f"You have received all your work currently. Please try again after {hours} hours."
-            if not work_approved:
+            if step > 0 and not work_approved:
                 msg += "\n\n⚠️ Tell Admin To Approve Your Pending Work."
                 
             await callback.answer(msg, show_alert=True)
@@ -691,22 +685,18 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         sent_batches = user.get("sent_batches", [])
         available_batches = [i for i in range(total_batches_available) if i not in sent_batches]
 
-        actual_batches = 1 if step == 0 else required_batches
+        actual_batches = 2 # Automatically deliver both batches without admin approval
 
         if len(available_batches) < actual_batches:
             await callback.answer("⚠️ Not enough new unique videos available in the Dump Channel. Please contact Admin.", show_alert=True)
             return
 
-        if step == 0:
-            await callback.message.answer("🚀 **First Batch Assigned!**\nDelivering your first 6 videos...")
-        else:
-            await callback.message.answer(f"🚀 **New Work Assigned!**\nDelivering {actual_batches} batches (6 videos each)...")
+        await callback.message.answer(f"🚀 **New Work Assigned!**\nDelivering {actual_batches} batches (6 videos each)...")
         
         selected_batches = random.sample(available_batches, actual_batches)
         
         for idx, batch_idx in enumerate(selected_batches, 1):
-            if step > 0:
-                await callback.message.answer(f"📦 **Batch {idx}**")
+            await callback.message.answer(f"📦 **Batch {idx}**")
             
             start_msg_id = base_msg_id + (batch_idx * 6)
             success_count = 0
@@ -728,38 +718,17 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
 
         sent_batches.extend(selected_batches)
         
-        if step == 0:
-            await users_col.update_one(
-                {"user_id": callback.from_user.id},
-                {"$set": {
-                    "pending_second_batch": True,
-                    "sent_batches": sent_batches
-                }}
-            )
-            admin_kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="Approved And Give", callback_data=f"give_second_batch_{callback.from_user.id}")
-            ]])
-            if ADMIN_ID:
-                try:
-                    await bot.send_message(
-                        ADMIN_ID, 
-                        f"🔔 **User Requested 2nd Batch**\n\nUser {callback.from_user.first_name} (`{callback.from_user.id}`) just received their 1st batch and is waiting for the 2nd one.\n\nClick below to approve and send.",
-                        reply_markup=admin_kb
-                    )
-                except Exception:
-                    pass
-                    
-            await callback.message.answer("✅ **First Batch Delivered!**\n\nThe Admin has been notified to send your second batch. Please wait for their approval.")
-        else:
-            await users_col.update_one(
-                {"user_id": callback.from_user.id},
-                {"$set": {
-                    "last_work_time": now,
-                    "sent_batches": sent_batches,
-                    "work_approved": False
-                }, "$inc": {"schedule_step": 1}}
-            )
-            await callback.message.answer(f"✅ **Work Delivered!**\n\nUpload on Instagram account, 6 videos each account, and submit work.")
+        await users_col.update_one(
+            {"user_id": callback.from_user.id},
+            {"$set": {
+                "last_work_time": now,
+                "sent_batches": sent_batches,
+                "work_approved": False,
+                "pending_second_batch": False 
+            }, "$inc": {"schedule_step": 1}}
+        )
+        
+        await callback.message.answer("✅ **Work Delivered!**\n\nPost 6 account 6 reach for both accounts and submit work again.")
 
     except Exception as e:
         logger.error(f"Error in request_new_work: {e}")
@@ -1086,7 +1055,7 @@ async def receive_dp_storage_media(message: Message, state: FSMContext) -> None:
             await save_media(media_data)
             save_msg = f"✅ Media ID saved to DB under **{step.capitalize()}**!"
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"dp_view_{step}")]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"dp_view_{step}")]]))
         await message.reply(f"{save_msg}\n\nYou can keep sending more data to save, or go back.", reply_markup=kb)
     except Exception as e:
         logger.error(f"Error in receive_dp_storage_media: {e}")
@@ -1976,7 +1945,7 @@ async def admin_add_user_prompt(callback: CallbackQuery, state: FSMContext) -> N
         logger.error(f"Error in admin_add_user_prompt: {e}")
 
 @router.message(AdminStates.waiting_for_add_user)
-async def admin_add_user_save(message: Message, state: FSMContext) -> None:
+async def admin_add_user_save(message: Message, state: FSMContext, bot: Bot) -> None:
     try:
         user_id = None
         username = ""
@@ -2026,6 +1995,10 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
                     {"_id": user["_id"]}, 
                     {"$set": {"is_active": True, "approval_date": datetime.now()}}
                 )
+                try:
+                    await bot.send_message(user["user_id"], "🎉 **You have successfully applied and we have successfully approved you for our staff joining!**\n\nPlease use /start, go on **Staff Only** and submit your work.", parse_mode="Markdown")
+                except Exception:
+                    pass
             asyncio.create_task(update_existing_user())
         else:
             # New Pre-approval creation
@@ -2052,6 +2025,11 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
                     "work_approved": True, 
                     "last_work_time": None
                 })
+                if new_user_id != 0:
+                    try:
+                        await bot.send_message(new_user_id, "🎉 **You have successfully applied and we have successfully approved you for our staff joining!**\n\nPlease use /start, go on **Staff Only** and submit your work.", parse_mode="Markdown")
+                    except Exception:
+                        pass
             asyncio.create_task(insert_new_user())
             
         await state.clear()
@@ -2613,7 +2591,7 @@ async def admin_close_panel(callback: CallbackQuery, state: FSMContext) -> None:
 # ==========================================
 
 @router.message(Command("add_user"))
-async def admin_add_user(message: Message) -> None:
+async def admin_add_user(message: Message, bot: Bot) -> None:
     try:
         if not await is_admin_user(message.from_user.id):
             return
@@ -2658,6 +2636,10 @@ async def admin_add_user(message: Message) -> None:
         
         if result.modified_count > 0:
             await message.reply(f"✅ User **{users[0].get('first_name')}** (`{target_id}`) is now an ACTIVE member.", parse_mode="Markdown")
+            try:
+                await bot.send_message(target_id, "🎉 **You have successfully applied and we have successfully approved you for our staff joining!**\n\nPlease use /start, go on **Staff Only** and submit your work.", parse_mode="Markdown")
+            except Exception:
+                pass
         else:
             await message.reply("User is already active.")
             
