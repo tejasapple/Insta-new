@@ -15,7 +15,8 @@ from aiogram.types import (
     InlineKeyboardButton,
     LinkPreviewOptions,
     TelegramObject,
-    BufferedInputFile
+    BufferedInputFile,
+    MessageOriginUser
 )
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.state import State, StatesGroup
@@ -303,8 +304,8 @@ async def get_bot_settings() -> Dict[str, str]:
 class WorkSubmission(StatesGroup):
     waiting_for_link1 = State()
     waiting_for_link2 = State()
-    waiting_for_photo = State()
-    waiting_for_views = State()
+    waiting_for_photo1 = State()
+    waiting_for_photo2 = State()
 
 class AdminStates(StatesGroup):
     waiting_for_work_link = State()
@@ -644,7 +645,6 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         work_approved = user.get("work_approved", True)
         last_work_time = user.get("last_work_time")
         now = datetime.now()
-        is_admin = await is_admin_user(callback.from_user.id)
         
         if pending_second:
             await callback.answer("⏳ Please wait for the Admin to approve and give you your second batch.", show_alert=True)
@@ -660,22 +660,21 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         elif step > 2:
             next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now
 
+        # Strictly enforce the cooldown timer (admin bypass removed as per instructions)
         if step > 0 and next_allowed and now < next_allowed:
-            if is_admin:
-                await callback.answer("🛠️ Admin Bypass: Timer ignored for testing.", show_alert=False)
-            else:
-                wait_time = next_allowed - now
-                hours, remainder = divmod(wait_time.total_seconds(), 3600)
-                minutes = remainder // 60
+            wait_time = next_allowed - now
+            hours = int(wait_time.total_seconds() // 3600)
+            if hours < 1:
+                hours = 1
                 
-                msg = f"⏳ Please wait {int(hours)} hours and {int(minutes)} minutes."
-                if not work_approved:
-                    msg += "\n\n⚠️ Tell Admin To Approve Your Pending Work."
-                    
-                await callback.answer(msg, show_alert=True)
-                return
+            msg = f"You have received all your work currently. Please try again after {hours} hours."
+            if not work_approved:
+                msg += "\n\n⚠️ Tell Admin To Approve Your Pending Work."
+                
+            await callback.answer(msg, show_alert=True)
+            return
 
-        if step > 0 and not work_approved and not is_admin:
+        if step > 0 and not work_approved:
             await callback.answer("⚠️ Your previous work has not been approved yet. Tell Admin To Approve Your Pending Work.", show_alert=True)
             return
 
@@ -781,7 +780,7 @@ async def submit_work_start(callback: CallbackQuery, state: FSMContext) -> None:
             [InlineKeyboardButton(text="« Back", callback_data="staff_only_menu")]
         ])
         
-        text = "📝 **Work Submission Panel**\n\nPlease send your **First Channel Link** below:"
+        text = "📝 **Work Submission Panel**\n\nPlease share **first Instagram profile link** below:"
         await safe_edit_message(callback, text, cancel_kb)
     except Exception as e:
         logger.error(f"Error in submit_work: {e}")
@@ -791,7 +790,7 @@ async def process_work_link1(message: Message, state: FSMContext) -> None:
     try:
         await state.update_data(link1=message.text)
         await state.set_state(WorkSubmission.waiting_for_link2)
-        await message.reply("✅ First link received!\n\nNow, please send your **Second Channel Link**:")
+        await message.reply("✅ First link received!\n\nNow share **second Instagram profile link**:")
     except Exception as e:
         logger.error(f"Error in process_work_link1: {e}")
 
@@ -799,25 +798,25 @@ async def process_work_link1(message: Message, state: FSMContext) -> None:
 async def process_work_link2(message: Message, state: FSMContext) -> None:
     try:
         await state.update_data(link2=message.text)
-        await state.set_state(WorkSubmission.waiting_for_photo)
-        await message.reply("✅ Second link received!\n\nNow, please send the **Channel Photo** (as a Photo).")
+        await state.set_state(WorkSubmission.waiting_for_photo1)
+        await message.reply("✅ Second link received!\n\nNow send **first Instagram profile pick** (as a Photo).\n*(Clearly mention views)*")
     except Exception as e:
         logger.error(f"Error in process_work_link2: {e}")
 
-@router.message(WorkSubmission.waiting_for_photo, F.photo)
-async def process_work_photo(message: Message, state: FSMContext) -> None:
+@router.message(WorkSubmission.waiting_for_photo1, F.photo)
+async def process_work_photo1(message: Message, state: FSMContext) -> None:
     try:
-        photo_id = message.photo[-1].file_id
-        await state.update_data(photo_id=photo_id)
-        await state.set_state(WorkSubmission.waiting_for_views)
-        await message.reply("✅ Photo received!\n\nNow, please send the **Channels View** (e.g., 6-6 web ke screenshot dalo).")
+        photo1_id = message.photo[-1].file_id
+        await state.update_data(photo1_id=photo1_id)
+        await state.set_state(WorkSubmission.waiting_for_photo2)
+        await message.reply("✅ First photo received!\n\nNow send **second Instagram profile pick** (as a Photo).\n*(Clearly mention views)*")
     except Exception as e:
-        logger.error(f"Error in process_work_photo: {e}")
+        logger.error(f"Error in process_work_photo1: {e}")
 
-@router.message(WorkSubmission.waiting_for_views)
-async def process_work_views(message: Message, state: FSMContext) -> None:
+@router.message(WorkSubmission.waiting_for_photo2, F.photo)
+async def process_work_photo2(message: Message, state: FSMContext) -> None:
     try:
-        views = message.text
+        photo2_id = message.photo[-1].file_id
         data = await state.get_data()
         
         sub_doc = {
@@ -825,8 +824,8 @@ async def process_work_views(message: Message, state: FSMContext) -> None:
             "user_name": message.from_user.first_name,
             "link1": data.get("link1", "N/A"),
             "link2": data.get("link2", "N/A"),
-            "photo_id": data.get("photo_id"),
-            "views": views,
+            "photo1_id": data.get("photo1_id"),
+            "photo2_id": photo2_id,
             "status": "pending", 
             "timestamp": datetime.now()
         }
@@ -1511,7 +1510,7 @@ async def admin_marked_subs(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error(f"Error in admin_marked_subs: {e}")
 
-# --- CHECK NEXT IMPLEMENTATION (PAGINATED VIEW INSIDE A SPECIFIC USER) ---
+# --- CHECK NEXT IMPLEMENTATION (PAGINATED VIEW INSIDE A SPECIFIC USER WITH DOUBLE PHOTOS) ---
 
 @router.callback_query(F.data.startswith("view_unmarked_"))
 async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
@@ -1526,7 +1525,6 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
             user_id = int(parts[2])
             skip = int(parts[3])
 
-        # Get total pending for pagination UI
         total_pending = await submissions_col.count_documents({"user_id": user_id, "status": "pending"})
         
         if total_pending == 0:
@@ -1544,29 +1542,23 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
             
         sub = subs_list[0]
         
-        # APPLIED CLEAN_MD FIX TO PREVENT CRASH
         l1 = clean_md(str(sub.get('link1', sub.get('link', 'N/A'))))
         l2 = clean_md(str(sub.get('link2', 'N/A')))
-        v = clean_md(str(sub.get('views', 'N/A')))
         name = clean_md(str(sub.get('user_name', 'Unknown')))
         
-        # TRUNCATE HUGE TEXT TO PREVENT CAPTION/API LIMIT ERROR (1024 char limit)
         if len(l1) > 200: l1 = l1[:197] + "..."
         if len(l2) > 200: l2 = l2[:197] + "..."
-        if len(v) > 200: v = v[:197] + "..."
         
-        caption_text = (
+        caption1 = (
             f"👤 **User:** {name}\n"
             f"🆔 **ID:** `{sub.get('user_id')}`\n"
-            f"📌 **Status:** UNMARKED ({skip + 1} of {total_pending})\n"
-            f"🔗 **Channel 1:** {l1}\n"
-            f"🔗 **Channel 2:** {l2}\n"
-            f"👁️ **Views:** {v}\n"
+            f"📌 **Status:** UNMARKED ({skip + 1} of {total_pending})\n\n"
+            f"🔗 **First Profile:** {l1}"
         )
+        caption2 = f"🔗 **Second Profile:** {l2}"
         
         sub_id = str(sub["_id"])
         
-        # Build Keyboard with Action and Pagination Next/Prev
         action_kb = InlineKeyboardBuilder()
         action_kb.row(
             InlineKeyboardButton(text="✅ Accept", callback_data=f"accept_sub_{sub_id}"),
@@ -1586,28 +1578,24 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
             
         action_kb.row(InlineKeyboardButton(text="« Back to List", callback_data="admin_unmarked_subs_0"))
         
-        photo_id = sub.get("photo_id")
+        photo1_id = sub.get("photo1_id")
+        photo2_id = sub.get("photo2_id")
         
-        # Ensure smooth transition even if photo is present or missing
         try:
             if callback.message.photo or callback.message.video or callback.message.document:
                 await callback.message.delete()
                 
-            if photo_id:
-                await bot.send_photo(
-                    chat_id=callback.from_user.id,
-                    photo=photo_id,
-                    caption=caption_text,
-                    reply_markup=action_kb.as_markup(),
-                    parse_mode="Markdown"
-                )
-            else:
-                await bot.send_message(
-                    chat_id=callback.from_user.id,
-                    text=caption_text,
-                    reply_markup=action_kb.as_markup(),
-                    parse_mode="Markdown"
-                )
+            if photo1_id and photo2_id:
+                await bot.send_photo(chat_id=callback.from_user.id, photo=photo1_id, caption=caption1, parse_mode="Markdown")
+                await bot.send_photo(chat_id=callback.from_user.id, photo=photo2_id, caption=caption2, reply_markup=action_kb.as_markup(), parse_mode="Markdown")
+            else: # Fallback for old 1-photo logic if remaining
+                photo_id = sub.get("photo_id")
+                v = clean_md(str(sub.get('views', 'N/A')))
+                if photo_id:
+                    cap = f"{caption1}\n🔗 **Second Profile:** {l2}\n👁️ **Views:** {v}"
+                    await bot.send_photo(chat_id=callback.from_user.id, photo=photo_id, caption=cap, reply_markup=action_kb.as_markup(), parse_mode="Markdown")
+                else:
+                    await bot.send_message(chat_id=callback.from_user.id, text=f"{caption1}\n{caption2}", reply_markup=action_kb.as_markup(), parse_mode="Markdown")
         except Exception as ex:
             logger.error(f"Error sending submission details to admin: {ex}")
             await callback.answer("⚠️ Failed to display submission. Check logs.", show_alert=True)
@@ -1645,23 +1633,21 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
         sub = subs_list[0]
         status = "✅ ACCEPTED" if sub.get("status") == "accepted" else "❌ DENIED"
         
-        # APPLIED CLEAN_MD FIX TO PREVENT CRASH
         l1 = clean_md(str(sub.get('link1', sub.get('link', 'N/A'))))
         l2 = clean_md(str(sub.get('link2', 'N/A')))
         name = clean_md(str(sub.get('user_name', 'Unknown')))
         
-        # TRUNCATE FOR API LIMIT
         if len(l1) > 200: l1 = l1[:197] + "..."
         if len(l2) > 200: l2 = l2[:197] + "..."
         
-        caption_text = (
+        caption1 = (
             f"👤 **User:** {name}\n"
             f"🆔 **ID:** `{sub.get('user_id')}`\n"
             f"📌 **Status:** {status} ({skip + 1} of {total_marked})\n"
-            f"🔗 **Channel 1:** {l1}\n"
-            f"🔗 **Channel 2:** {l2}\n"
-            f"🕒 **Time:** {sub.get('timestamp').strftime('%d %b, %I:%M %p')}\n"
+            f"🕒 **Time:** {sub.get('timestamp').strftime('%d %b, %I:%M %p')}\n\n"
+            f"🔗 **First Profile:** {l1}"
         )
+        caption2 = f"🔗 **Second Profile:** {l2}"
         
         action_kb = InlineKeyboardBuilder()
         nav_row = []
@@ -1676,15 +1662,22 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
             
         action_kb.row(InlineKeyboardButton(text="« Back to List", callback_data="admin_marked_subs_0"))
         
-        photo_id = sub.get("photo_id")
+        photo1_id = sub.get("photo1_id")
+        photo2_id = sub.get("photo2_id")
+
         try:
             if callback.message.photo or callback.message.video or callback.message.document:
                 await callback.message.delete()
                 
-            if photo_id:
-                await bot.send_photo(chat_id=callback.from_user.id, photo=photo_id, caption=caption_text, reply_markup=action_kb.as_markup(), parse_mode="Markdown")
+            if photo1_id and photo2_id:
+                await bot.send_photo(chat_id=callback.from_user.id, photo=photo1_id, caption=caption1, parse_mode="Markdown")
+                await bot.send_photo(chat_id=callback.from_user.id, photo=photo2_id, caption=caption2, reply_markup=action_kb.as_markup(), parse_mode="Markdown")
             else:
-                await bot.send_message(chat_id=callback.from_user.id, text=caption_text, reply_markup=action_kb.as_markup(), parse_mode="Markdown")
+                photo_id = sub.get("photo_id")
+                if photo_id:
+                    await bot.send_photo(chat_id=callback.from_user.id, photo=photo_id, caption=f"{caption1}\n{caption2}", reply_markup=action_kb.as_markup(), parse_mode="Markdown")
+                else:
+                    await bot.send_message(chat_id=callback.from_user.id, text=f"{caption1}\n{caption2}", reply_markup=action_kb.as_markup(), parse_mode="Markdown")
         except Exception as ex:
             logger.error(f"Error sending marked sub details: {ex}")
     except Exception as e:
@@ -1975,7 +1968,7 @@ async def admin_add_user_prompt(callback: CallbackQuery, state: FSMContext) -> N
             "Supported formats:\n"
             "• `123456789` (Telegram ID)\n"
             "• `@username` or `username`\n"
-            "• `https://t.me/username`\n\n"
+            "• **Forward any message from that user here**\n\n"
             "*Note: If they haven't started the bot yet, they will be pre-approved!*"
         )
         await safe_edit_message(callback, text, cancel_kb)
@@ -1985,14 +1978,38 @@ async def admin_add_user_prompt(callback: CallbackQuery, state: FSMContext) -> N
 @router.message(AdminStates.waiting_for_add_user)
 async def admin_add_user_save(message: Message, state: FSMContext) -> None:
     try:
-        query = message.text.strip()
+        user_id = None
+        username = ""
+        name = ""
+        query = ""
         
-        if "t.me/" in query:
-            query = query.split("t.me/")[-1].strip()
-        elif query.startswith("@"):
-            query = query[1:].strip()
-            
-        is_digit = query.lstrip('-').isdigit()
+        # Check if the message is a forwarded message from a user
+        if message.forward_origin:
+            if message.forward_origin.type == "user":
+                user_id = message.forward_origin.sender_user.id
+                username = message.forward_origin.sender_user.username or ""
+                name = message.forward_origin.sender_user.first_name or "User"
+                query = str(user_id)
+            elif message.forward_origin.type == "hidden_user":
+                await message.reply("⚠️ This user has hidden their account privacy for forwarded messages. Please add them using their Chat ID or Username instead.", reply_markup=await get_admin_panel_keyboard())
+                await state.clear()
+                return
+            else:
+                await message.reply("⚠️ Cannot extract user from this forwarded message. Ensure it's forwarded from a normal user.", reply_markup=await get_admin_panel_keyboard())
+                await state.clear()
+                return
+        else:
+            query = message.text.strip() if message.text else ""
+            if not query:
+                await message.reply("⚠️ Please send text or forward a message.")
+                return
+                
+            if "t.me/" in query:
+                query = query.split("t.me/")[-1].strip()
+            elif query.startswith("@"):
+                query = query[1:].strip()
+                
+        is_digit = query.lstrip('-').isdigit() if query else False
         
         user = None
         if is_digit:
@@ -2001,8 +2018,8 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
             user = await users_col.find_one({"username": {"$regex": f"^{query}$", "$options": "i"}})
             
         if user:
-            name = user.get("first_name", query)
-            await message.reply(f"✅ User **{name}** is now an ACTIVE member! (Processing in bg)", reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
+            final_name = user.get("first_name", query)
+            await message.reply(f"✅ User **{final_name}** is now an ACTIVE member! (Processing in bg)", reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
             
             async def update_existing_user():
                 await users_col.update_one(
@@ -2011,18 +2028,19 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
                 )
             asyncio.create_task(update_existing_user())
         else:
-            user_id = int(query) if is_digit else 0
-            username = query if not is_digit else ""
-            name = query
+            # New Pre-approval creation
+            new_user_id = user_id if user_id else (int(query) if is_digit else 0)
+            new_username = username if username else (query if not is_digit else "")
+            new_name = name if name else query
             
             success_msg = f"✅ User `{query}` has been **pre-approved** and added to Active Members!\n(Processing in background)"
             await message.reply(success_msg, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
             
             async def insert_new_user():
                 await users_col.insert_one({
-                    "user_id": user_id,
-                    "username": username,
-                    "first_name": name,
+                    "user_id": new_user_id,
+                    "username": new_username,
+                    "first_name": new_name,
                     "is_active": True,
                     "approval_date": datetime.now(),
                     "balance": 0,
@@ -2039,7 +2057,7 @@ async def admin_add_user_save(message: Message, state: FSMContext) -> None:
         await state.clear()
     except Exception as e:
         logger.error(f"Error in admin_add_user_save: {e}")
-        await message.reply("⚠️ Error adding user. Check format.", reply_markup=await get_admin_panel_keyboard())
+        await message.reply("⚠️ Error adding user. Check format or ensure the message was correctly forwarded.", reply_markup=await get_admin_panel_keyboard())
         await state.clear()
 
 @router.callback_query(F.data == "admin_check_user")
