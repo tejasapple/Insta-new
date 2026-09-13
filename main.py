@@ -26,8 +26,8 @@ from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
 import motor.motor_asyncio
 from motor.core import AgnosticCollection
-from bson import ObjectId
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from bson import ObjectId
 
 # Load environment variables
 load_dotenv()
@@ -543,7 +543,7 @@ async def show_withdrawal_list(callback: CallbackQuery) -> None:
 async def show_active_members(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
-        user = await get_user(callback.fromuser.id if hasattr(callback, 'from_user') else callback.from_user.id)
+        user = await get_user(callback.from_user.id)
         is_active_user = user.get("is_active", False) if user else False
         current_user_name = clean_md(user.get("first_name", "User")) if is_active_user else None
 
@@ -2748,18 +2748,20 @@ async def admin_balance_inquiry_handler(callback: CallbackQuery) -> None:
         ITEMS_PER_PAGE = 15
         skip_count = page * ITEMS_PER_PAGE
         
-        total_users = await users_col.count_documents({}) 
+        # UPGRADED: Filter exactly for active users only
+        total_users = await users_col.count_documents({"is_active": True}) 
         
+        # UPGRADED: Ensure find() query strictly matches is_active=True
         users = await users_col.find(
-            {}, 
+            {"is_active": True}, 
             projection={"first_name": 1, "join_date": 1, "balance": 1, "submission_count": 1}
         ).sort("join_date", -1).skip(skip_count).limit(ITEMS_PER_PAGE).to_list(length=ITEMS_PER_PAGE)
         
         if not users and page == 0:
-            await safe_edit_message(callback, "⚠️ No members found.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]]))
+            await safe_edit_message(callback, "⚠️ No active members found.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]]))
             return
             
-        text = f"💰 **Members Balance Inquiry (Page {page+1})**\n\n"
+        text = f"💰 **Active Members Balance Inquiry (Page {page+1})**\n\n"
         
         for u in users:
             name = str(u.get("first_name", "User"))
