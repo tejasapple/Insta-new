@@ -4,7 +4,7 @@ import os
 import random
 import re
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import Any, Dict, List, Tuple, Callable, Awaitable
 
 from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
@@ -199,8 +199,9 @@ FAKE_MEMBERS_BY_MONTH = {
 }
 
 async def get_daily_withdrawals() -> Tuple[List[Dict[str, Any]], int, int]:
-    today = datetime.now().date()
-    random.seed(today.toordinal())
+    today = datetime.now()
+    today_date = today.date()
+    random.seed(today_date.toordinal())
     
     # 100% Ensure NO Real Users ever go in payout list
     real_users_cursor = users_col.find({"is_active": True})
@@ -209,37 +210,67 @@ async def get_daily_withdrawals() -> Tuple[List[Dict[str, Any]], int, int]:
     
     available_names = [n for n in FAKE_NAMES if n.strip().lower() not in real_names]
     
-    # Strictly bound to fake names
-    num_today = random.randint(15, 20)
+    # Strictly bound to 12-15 fake names
+    num_today = random.randint(12, 15)
     selected_today = random.sample(available_names, min(num_today, len(available_names)))
     
-    withdrawals_today = []
-    total_today = 0
+    # Ensure 2-3 members for crypto and 2-3 for 00 amounts
+    crypto_indices = random.sample(range(num_today), min(random.randint(2, 3), num_today))
+    zero_indices = random.sample(range(num_today), min(random.randint(2, 3), num_today))
     
-    for name in selected_today:
-        amount = random.randint(3, 10) * 1000
-        hour = random.randint(9, 23)
-        minute = random.randint(0, 59)
-        time_str = f"{hour:02d}:{minute:02d}"
+    # Spread evenly across the day between 8 AM and 10 PM
+    times = []
+    for _ in range(num_today):
+        times.append(time(random.randint(8, 22), random.randint(0, 59)))
+    times.sort()
+    
+    all_today_withdrawals = []
+    for i in range(num_today):
+        name = selected_today[i]
+        w_time = times[i]
         
-        withdrawals_today.append({"name": name, "amount": amount, "time": time_str})
-        total_today += amount
-    
-    withdrawals_today.sort(key=lambda x: x["time"])
-    
-    total_7days = 0
-    for i in range(1, 8):
-        past_date = today - timedelta(days=i)
-        random.seed(past_date.toordinal())
-        num_past = random.randint(15, 20)
-        selected_past = random.sample(available_names, min(num_past, len(available_names)))
-        for _ in selected_past:
-            total_7days += random.randint(3, 10) * 1000
+        is_crypto = i in crypto_indices
+        is_zeros = i in zero_indices
+        
+        if is_crypto:
+            amount = random.randint(30, 85)
+            amount_str = f"{amount} Crypto"
+            raw_amount = 0
+        else:
+            amount = random.randint(3000, 8000)
+            if is_zeros:
+                amount = (amount // 100) * 100 # Makes sure it ends in 00
+            amount_str = f"₹{amount}"
+            raw_amount = amount
             
-    total_7days += total_today
-    random.seed()
+        all_today_withdrawals.append({
+            "name": name,
+            "amount_str": amount_str,
+            "raw_amount": raw_amount,
+            "time": w_time.strftime("%H:%M"),
+            "time_obj": w_time,
+            "is_crypto": is_crypto
+        })
     
-    return withdrawals_today, total_today, total_7days
+    # Filter for what should be visible at this exact moment in the day
+    current_time = today.time()
+    withdrawals_today = [w for w in all_today_withdrawals if w["time_obj"] <= current_time]
+    
+    total_today_inr = sum(w["raw_amount"] for w in withdrawals_today if not w["is_crypto"])
+    
+    total_7days_inr = 0
+    for i in range(1, 8):
+        past_date = today_date - timedelta(days=i)
+        random.seed(past_date.toordinal())
+        num_past = random.randint(12, 15)
+        for j in range(num_past):
+            amount = random.randint(3000, 8000)
+            total_7days_inr += amount
+            
+    total_7days_inr += total_today_inr
+    random.seed() # reset random state
+    
+    return withdrawals_today, total_today_inr, total_7days_inr
 
 # ==========================================
 # DATABASE HELPER FUNCTIONS
@@ -411,20 +442,23 @@ async def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📢 Broadcast", callback_data="admin_broadcast_menu")
             ],
             [
-                InlineKeyboardButton(text="👑 Manage Admins", callback_data="admin_manage_admins"),
+                InlineKeyboardButton(text="💰 Balance Inquiry", callback_data="admin_balance_inquiry_0"),
                 InlineKeyboardButton(text="🔗 User Work Links", callback_data="admin_work_links_0")
             ],
             [
-                InlineKeyboardButton(text="🔗 Set Work Link", callback_data="admin_set_work"),
-                InlineKeyboardButton(text="🔗 Set Proof Link", callback_data="admin_set_proof")
+                InlineKeyboardButton(text="👑 Manage Admins", callback_data="admin_manage_admins"),
+                InlineKeyboardButton(text="🔗 Set Work Link", callback_data="admin_set_work")
             ],
             [
-                InlineKeyboardButton(text="💾 Backup Database", callback_data="admin_backup"),
-                InlineKeyboardButton(text=maintenance_text, callback_data="admin_toggle_maintenance")
+                InlineKeyboardButton(text="🔗 Set Proof Link", callback_data="admin_set_proof"),
+                InlineKeyboardButton(text="💾 Backup Database", callback_data="admin_backup")
             ],
             [
-                InlineKeyboardButton(text="🏠 Main Panel", callback_data="back_to_menu"),
+                InlineKeyboardButton(text=maintenance_text, callback_data="admin_toggle_maintenance"),
                 InlineKeyboardButton(text="❌ Close Panel", callback_data="admin_close")
+            ],
+            [
+                InlineKeyboardButton(text="🏠 Main Panel", callback_data="back_to_menu")
             ]
         ]
     )
@@ -493,7 +527,7 @@ async def show_withdrawal_list(callback: CallbackQuery) -> None:
         text += f"📜 **Today's Recent Payments:**\n"
         
         for w in withdrawals:
-            text += f"✅ **{w['name']}** - ₹{w['amount']:,} at {w['time']}\n"
+            text += f"✅ **{w['name']}** - {w['amount_str']} at {w['time']}\n"
             
         await safe_edit_message(callback, text, InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]]
@@ -1115,7 +1149,7 @@ async def receive_dp_storage_media(message: Message, state: FSMContext) -> None:
             await save_media(media_data)
             save_msg = f"✅ Media ID saved to DB under **{step.capitalize()}**!"
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"dp_view_{step}")]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"dp_view_{step}")]]))
         await message.reply(f"{save_msg}\n\nYou can keep sending more data to save, or go back.", reply_markup=kb)
     except Exception as e:
         logger.error(f"Error in receive_dp_storage_media: {e}")
@@ -2556,6 +2590,51 @@ async def execute_bcast_msg(message: Message, state: FSMContext, bot: Bot) -> No
         logger.error(f"Error sending broadcast: {e}")
         await state.clear()
 
+# --- NEW: BALANCE INQUIRY ---
+@router.callback_query(F.data.startswith("admin_balance_inquiry_"))
+async def admin_balance_inquiry_handler(callback: CallbackQuery) -> None:
+    try:
+        await callback.answer()
+        page = int(callback.data.split("_")[-1])
+        ITEMS_PER_PAGE = 15
+        skip_count = page * ITEMS_PER_PAGE
+        
+        total_users = await users_col.count_documents({}) 
+        
+        users = await users_col.find({}).sort("join_date", -1).skip(skip_count).limit(ITEMS_PER_PAGE).to_list(length=ITEMS_PER_PAGE)
+        
+        if not users and page == 0:
+            await safe_edit_message(callback, "⚠️ No members found.", InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="open_admin_panel")]]))
+            return
+            
+        text = f"💰 **Members Balance Inquiry (Page {page+1})**\n\n"
+        
+        for u in users:
+            name = str(u.get("first_name", "User"))
+            if len(name) > 15: name = name[:12] + "..."
+            
+            jd = u.get("join_date", datetime.now())
+            day_str = str(jd.day)
+            
+            bal = u.get("balance", 0)
+            
+            text += f"👤 {name} | 📅 {day_str} | ₹{bal}\n"
+            
+        kb = InlineKeyboardBuilder()
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"admin_balance_inquiry_{page-1}"))
+        if skip_count + ITEMS_PER_PAGE < total_users:
+            nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"admin_balance_inquiry_{page+1}"))
+            
+        if nav_row:
+            kb.row(*nav_row)
+        kb.row(InlineKeyboardButton(text="« Back", callback_data="open_admin_panel"))
+        
+        await safe_edit_message(callback, text, kb.as_markup())
+    except Exception as e:
+        logger.error(f"Error in balance inquiry: {e}")
+
 @router.callback_query(F.data.startswith("admin_work_links_"))
 async def admin_all_work_links(callback: CallbackQuery) -> None:
     try:
@@ -2807,6 +2886,57 @@ async def work_notification_job(bot: Bot) -> None:
     except Exception as e:
         logger.error(f"Error in work_notification_job: {e}")
 
+# --- NEW: AUTO BROADCAST JOB FOR FAKE PAYOUTS ---
+async def payout_broadcast_job(bot: Bot) -> None:
+    """Checks for newly generated fake payouts in the last 5 minutes and broadcasts them."""
+    try:
+        now = datetime.now()
+        start_window = (now - timedelta(minutes=5)).time()
+        end_window = now.time()
+        
+        withdrawals, _, _ = await get_daily_withdrawals()
+        
+        to_broadcast = []
+        for w in withdrawals:
+            w_time = w["time_obj"]
+            # Check if this fake payout's time falls in the last 5 minutes
+            if start_window <= w_time <= end_window:
+                to_broadcast.append(w)
+                
+        if not to_broadcast:
+            return
+            
+        active_users = await users_col.find({"is_active": True, "is_banned": False}).to_list(length=None)
+        
+        for w in to_broadcast:
+            name = w["name"]
+            amount_str = w["amount_str"]
+            is_crypto = w["is_crypto"]
+            
+            if is_crypto:
+                msg = (
+                    f"🎉 **New Withdrawal Update**\n\n"
+                    f"👤 **Name:** {name}\n"
+                    f"💰 **Amount:** {amount_str}\n\n"
+                    f"✅ tumhara withdrawal successful ho chuka hai. If any issue, so please contact our admin."
+                )
+            else:
+                msg = (
+                    f"🎉 **New Withdrawal Update**\n\n"
+                    f"👤 **Name:** {name}\n"
+                    f"💰 **Amount:** {amount_str}\n\n"
+                    f"✅ Successfully withdrawal"
+                )
+                
+            for u in active_users:
+                try:
+                    await bot.send_message(u["user_id"], msg)
+                    await asyncio.sleep(0.05) # Rate limit protection
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.error(f"Error in payout_broadcast_job: {e}")
+
 
 # ==========================================
 # MAIN EXECUTION
@@ -2821,6 +2951,7 @@ async def main() -> None:
     # Scheduler Setup for the Notification Background Loop (Runs every 5 minutes)
     scheduler = AsyncIOScheduler()
     scheduler.add_job(work_notification_job, 'interval', minutes=5, args=[bot])
+    scheduler.add_job(payout_broadcast_job, 'interval', minutes=5, args=[bot]) # NEW BROADCAST JOB ADDED
     scheduler.start()
     
     try:
