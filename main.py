@@ -543,7 +543,7 @@ async def show_withdrawal_list(callback: CallbackQuery) -> None:
 async def show_active_members(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
-        user = await get_user(callback.from_user.id)
+        user = await get_user(callback.fromuser.id)
         is_active_user = user.get("is_active", False) if user else False
         current_user_name = user.get("first_name", "User") if is_active_user else None
 
@@ -778,9 +778,9 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             minutes, _ = divmod(remainder, 60)
             
             if step == 0:
-                msg = f"⏳ {hours} hours and {minutes} minutes remaining!\n\nPlease retry after this time to get your new work and apply."
+                msg = f"⏳ 4 Hour Limit Block!\n\nYour limit opens in {hours} hours and {minutes} minutes.\n\nPlease retry after this time to get your new work."
             else:
-                msg = f"⏳ {hours} hours and {minutes} minutes remaining until your next batch."
+                msg = f"⏳ {hours} hours and {minutes} minutes remaining until your next batch limit opens."
                 
             if step > 0 and not work_approved:
                 msg += "\n\n⚠️ Tell Admin To Approve Your Pending Work."
@@ -2713,7 +2713,7 @@ async def admin_balance_inquiry_handler(callback: CallbackQuery) -> None:
         # Using simple projection and limited skip/limit for lightning fast query
         users = await users_col.find(
             {}, 
-            projection={"first_name": 1, "join_date": 1, "balance": 1}
+            projection={"first_name": 1, "join_date": 1, "balance": 1, "submission_count": 1}
         ).sort("join_date", -1).skip(skip_count).limit(ITEMS_PER_PAGE).to_list(length=ITEMS_PER_PAGE)
         
         if not users and page == 0:
@@ -2729,8 +2729,12 @@ async def admin_balance_inquiry_handler(callback: CallbackQuery) -> None:
             jd = u.get("join_date", datetime.now())
             day_str = str(jd.day)
             bal = u.get("balance", 0)
+            subs_count = u.get("submission_count", 0)
             
-            text += f"👤 {name} | 📅 {day_str} | ₹{bal}\n"
+            # Date aur Balance ke beech mein link ka logo, agar work submit kiya hai
+            link_logo = " 🔗 " if subs_count > 0 else " "
+            
+            text += f"👤 {name} | 📅 {day_str}{link_logo}₹{bal}\n"
             
         kb = InlineKeyboardBuilder()
         nav_row = []
@@ -2955,8 +2959,7 @@ async def work_notification_job(bot: Bot) -> None:
                     try:
                         await bot.send_message(
                             uid, 
-                            "🔔 **New Work Available!**\n\nYour limit is open. Download and post on Insta reels and submit work.",
-                            parse_mode="Markdown"
+                            "तुम्हारा नया बैच आ गया है। स्टाफ ओनली में जाओ, न्यू वर्क पर जाओ एंड डन करो और रील से लो और अपलोड करो।"
                         )
                         await users_col.update_one({"_id": u["_id"]}, {"$set": {"notified_new_work": True}})
                     except Exception as e:
