@@ -543,7 +543,7 @@ async def show_withdrawal_list(callback: CallbackQuery) -> None:
 async def show_active_members(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
-        user = await get_user(callback.from_user.id)
+        user = await get_user(callback.fromuser.id if hasattr(callback, 'from_user') else callback.from_user.id)
         is_active_user = user.get("is_active", False) if user else False
         current_user_name = clean_md(user.get("first_name", "User")) if is_active_user else None
 
@@ -752,7 +752,7 @@ async def staff_today_balance(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "request_new_work")
 async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
     try:
-        await callback.answer("📥 Processing your work request...")
+        # NOTE: DO NOT answer callback initially to prevent pop-up block
         user = await get_user(callback.from_user.id)
         if not user or not user.get("is_active"):
             await callback.answer("🚫 Access Denied! This is for only our staff.", show_alert=True)
@@ -764,11 +764,13 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         approval_date = user.get("approval_date") or user.get("join_date", datetime.now())
         now = datetime.now()
         
-        # New 4-hour cooldown logic for first work, 6-hour for next works
+        # New 4-hour cooldown logic for first work, 6-hour for next, 8-hour for all subsequent
         if step == 0:
             next_allowed = approval_date + timedelta(hours=4)
-        else:
+        elif step == 1:
             next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now + timedelta(hours=6)
+        else:
+            next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now + timedelta(hours=8)
 
         if next_allowed and now < next_allowed:
             wait_time = next_allowed - now
@@ -777,12 +779,15 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             
             if step == 0:
                 msg = f"⏳ 4 Hour Limit Block!\n\nYour limit opens in {hours} hours and {minutes} minutes.\n\nPlease retry after this time to get your new work."
+            elif step == 1:
+                msg = f"⏳ 6 Hour Limit Block!\n\n{hours} hours and {minutes} minutes remaining until your next batch limit opens."
             else:
-                msg = f"⏳ {hours} hours and {minutes} minutes remaining until your next batch limit opens."
+                msg = f"⏳ 8 Hour Limit Block!\n\n{hours} hours and {minutes} minutes remaining until your next batch limit opens."
                 
             if step > 0 and not work_approved:
                 msg += "\n\n⚠️ Tell Admin To Approve Your Pending Work."
                 
+            # Safely triggers exact pop-up
             await callback.answer(msg, show_alert=True)
             return
 
@@ -790,9 +795,12 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             await callback.answer("⚠️ Your previous work has not been approved yet. Tell Admin To Approve Your Pending Work.", show_alert=True)
             return
 
+        # Safe to show processing state now that limits are passed
+        await callback.answer("📥 Processing your work request...")
+
         dump_settings = await settings_col.find_one({"_id": "dump_settings"})
         if not dump_settings:
-            await callback.answer("⚠️ Admin hasn't configured the Dump Channel yet.", show_alert=True)
+            await callback.message.answer("⚠️ Admin hasn't configured the Dump Channel yet.")
             return
 
         chat_id = dump_settings.get("chat_id")
@@ -806,7 +814,7 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         actual_batches = 2 # Automatically deliver both batches (12 videos) without admin approval
 
         if len(available_batches) < actual_batches:
-            await callback.answer("⚠️ Not enough new unique videos available in the Dump Channel. Please contact Admin.", show_alert=True)
+            await callback.message.answer("⚠️ Not enough new unique videos available in the Dump Channel. Please contact Admin.")
             return
 
         await callback.message.answer(f"🚀 **New Work Assigned! Your batch is open.**\nDelivering {actual_batches} batches (6 reels each)...")
@@ -827,7 +835,8 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
                         message_id=start_msg_id + i
                     )
                     success_count += 1
-                    await asyncio.sleep(0.3)
+                    # Slightly increased sleep to completely prevent flood wait for 12 rapid videos
+                    await asyncio.sleep(0.5) 
                 except Exception as e:
                     logger.warning(f"Failed to copy msg {start_msg_id + i} from {chat_id}: {e}")
             
@@ -855,7 +864,10 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
 
     except Exception as e:
         logger.error(f"Error in request_new_work: {e}")
-        await callback.answer("An error occurred while fetching work.", show_alert=True)
+        try:
+            await callback.answer("An error occurred while fetching work.", show_alert=True)
+        except:
+            pass
 
 # ---------------------------------------------
 # UPGRADED SUBMIT WORK DASHBOARD (4 BUTTONS)
@@ -2979,15 +2991,18 @@ async def work_notification_job(bot: Bot) -> None:
                 
                 if step == 0:
                     next_allowed = approval_date + timedelta(hours=4)
-                else:
+                elif step == 1:
                     if work_approved:
                         next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now + timedelta(hours=6)
+                else:
+                    if work_approved:
+                        next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now + timedelta(hours=8)
                 
                 if next_allowed and now >= next_allowed:
                     try:
                         await bot.send_message(
                             uid, 
-                            "तुम्हारा नया बैच आ गया है। स्टाफ ओनली में जाओ, न्यू वर्क पर जाओ एंड डन करो और रील से लो और अपलोड करो।"
+                            "🔔 Aapka time pura ho gaya hai aur naya batch mil gaya hai, to please Staff Only mein jao and New Work pe click karo and reels lo and post karo and wo karo."
                         )
                         await users_col.update_one({"_id": u["_id"]}, {"$set": {"notified_new_work": True}})
                     except Exception as e:
