@@ -492,7 +492,7 @@ async def start_cmd(message: Message, bot: Bot, state: FSMContext) -> None:
                 await register_user_if_not_exists(user_id, username, first_name)
                 
                 if not existing_by_id and not is_pre_registered and ADMIN_ID != 0:
-                    notify_text = f"🆕 **New User Started the Bot!**\n\n👤 Name: {first_name}\n🔗 Username: @{username}\n🆔 ID: `{user_id}`"
+                    notify_text = f"🆕 **New User Started the Bot!**\n\n👤 Name: {clean_md(first_name)}\n🔗 Username: @{clean_md(username)}\n🆔 ID: `{user_id}`"
                     try:
                         await bot.send_message(ADMIN_ID, notify_text, parse_mode="Markdown")
                     except Exception:
@@ -506,7 +506,7 @@ async def start_cmd(message: Message, bot: Bot, state: FSMContext) -> None:
         is_admin = await is_admin_user(user_id)
         
         text = (
-            f"🏢 **Welcome to the Official Work Portal, {first_name}!** 🌟\n\n"
+            f"🏢 **Welcome to the Official Work Portal, {clean_md(first_name)}!** 🌟\n\n"
             "We provide a premium platform for professionals to monetize their Instagram presence through targeted ad campaigns.\n\n"
             "📊 **Your Dashboard Overview:**\n"
             "• Manage your workflow seamlessly.\n"
@@ -514,7 +514,7 @@ async def start_cmd(message: Message, bot: Bot, state: FSMContext) -> None:
             "• Submit your completed tasks for rapid approval.\n\n"
             "👇 *Please select an option below to navigate your dashboard:*"
         )
-        await message.answer(text, reply_markup=get_main_menu_keyboard(settings["work_link"], settings["proof_link"], is_admin))
+        await message.answer(text, reply_markup=get_main_menu_keyboard(settings["work_link"], settings["proof_link"], is_admin), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in start command: {e}")
 
@@ -543,18 +543,16 @@ async def show_withdrawal_list(callback: CallbackQuery) -> None:
 async def show_active_members(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
-        user = await get_user(callback.fromuser.id)
+        user = await get_user(callback.from_user.id)
         is_active_user = user.get("is_active", False) if user else False
-        current_user_name = user.get("first_name", "User") if is_active_user else None
+        current_user_name = clean_md(user.get("first_name", "User")) if is_active_user else None
 
         text = "🌟 **Our Active Working Members** 🌟\n\n"
         
         for month, names in FAKE_MEMBERS_BY_MONTH.items():
             if month == "September 2026":
-                # As requested: Only show the current user's real name among fakes. Remove other real users.
                 combined_names = names.copy()
                 if current_user_name:
-                    # Randomly insert the user's name into the list for realism
                     insert_idx = random.randint(0, len(combined_names) - 1)
                     combined_names.insert(insert_idx, current_user_name)
                 
@@ -591,7 +589,7 @@ async def show_balance(callback: CallbackQuery) -> None:
         balance = user.get("balance", 0)
         text = (
             f"💰 **My Wallet Balance**\n\n"
-            f"👤 User: {callback.from_user.first_name}\n"
+            f"👤 User: {clean_md(callback.from_user.first_name)}\n"
             f"💵 Current Balance: ₹{balance:,}"
         )
         await safe_edit_message(callback, text, InlineKeyboardMarkup(
@@ -737,7 +735,7 @@ async def staff_today_balance(callback: CallbackQuery) -> None:
         
         text = (
             f"📊 **Today Balance Overview**\n\n"
-            f"👤 Staff Member: {callback.from_user.first_name}\n"
+            f"👤 Staff Member: {clean_md(callback.from_user.first_name)}\n"
             f"💸 Current Total Earnings: ₹{balance:,}\n\n"
             f"*(You can request a withdrawal below once minimum limits and hours are met)*"
         )
@@ -1028,7 +1026,7 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
         settings = await get_bot_settings()
         is_admin = await is_admin_user(callback.from_user.id)
         text = (
-            f"🏢 **Welcome to the Official Work Portal, {callback.from_user.first_name}!** 🌟\n\n"
+            f"🏢 **Welcome to the Official Work Portal, {clean_md(callback.from_user.first_name)}!** 🌟\n\n"
             "We provide a premium platform for professionals to monetize their Instagram presence through targeted ad campaigns.\n\n"
             "📊 **Your Dashboard Overview:**\n"
             "• Manage your workflow seamlessly.\n"
@@ -1558,7 +1556,7 @@ async def admin_set_dump_total_videos(message: Message, state: FSMContext) -> No
         logger.error(f"Error in admin_set_dump_total_videos: {e}")
 
 
-# --- PAGINATED UNMARKED & MARKED SUBMISSIONS LOGIC ---
+# --- PAGINATED UNMARKED & MARKED SUBMISSIONS LOGIC (WITH CURRENT BALANCE) ---
 @router.callback_query(F.data.startswith("admin_unmarked_subs_"))
 async def admin_unmarked_subs(callback: CallbackQuery) -> None:
     try:
@@ -1576,6 +1574,14 @@ async def admin_unmarked_subs(callback: CallbackQuery) -> None:
                 "count": {"$sum": 1},
                 "latest": {"$first": "$timestamp"}
             }},
+            {"$lookup": {
+                "from": "users",
+                "localField": "_id",
+                "foreignField": "user_id",
+                "as": "user_info"
+            }},
+            {"$unwind": {"path": "$user_info", "preserveNullAndEmptyArrays": True}},
+            {"$addFields": {"balance": {"$ifNull": ["$user_info.balance", 0]}}},
             {"$sort": {"latest": -1}},
             {"$skip": skip_count},
             {"$limit": ITEMS_PER_PAGE}
@@ -1598,7 +1604,8 @@ async def admin_unmarked_subs(callback: CallbackQuery) -> None:
             
         kb = InlineKeyboardBuilder()
         for s in grouped_subs:
-            kb.button(text=f"📄 {s['user_name']} ({s['count']} unmarked)", callback_data=f"view_unmarked_{s['_id']}_0")
+            # Inline button format allows raw text, so we add balance smoothly here.
+            kb.button(text=f"📄 {s['user_name']} - ₹{s.get('balance', 0)} ({s['count']} subs)", callback_data=f"view_unmarked_{s['_id']}_0")
         
         nav_row = []
         if page > 0:
@@ -1634,6 +1641,14 @@ async def admin_marked_subs(callback: CallbackQuery) -> None:
                 "count": {"$sum": 1},
                 "latest": {"$first": "$timestamp"}
             }},
+            {"$lookup": {
+                "from": "users",
+                "localField": "_id",
+                "foreignField": "user_id",
+                "as": "user_info"
+            }},
+            {"$unwind": {"path": "$user_info", "preserveNullAndEmptyArrays": True}},
+            {"$addFields": {"balance": {"$ifNull": ["$user_info.balance", 0]}}},
             {"$sort": {"latest": -1}},
             {"$skip": skip_count},
             {"$limit": ITEMS_PER_PAGE}
@@ -1656,7 +1671,7 @@ async def admin_marked_subs(callback: CallbackQuery) -> None:
             
         kb = InlineKeyboardBuilder()
         for s in grouped_subs:
-            kb.button(text=f"📁 {s['user_name']} ({s['count']} marked)", callback_data=f"view_marked_{s['_id']}_0")
+            kb.button(text=f"📁 {s['user_name']} - ₹{s.get('balance', 0)} ({s['count']} subs)", callback_data=f"view_marked_{s['_id']}_0")
         
         nav_row = []
         if page > 0:
@@ -1706,6 +1721,10 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
             
         sub = subs_list[0]
         
+        # Getting the user's current balance to display right next to the name
+        user_doc = await users_col.find_one({"user_id": user_id})
+        balance = user_doc.get("balance", 0) if user_doc else 0
+        
         l1 = clean_md(str(sub.get('link1', sub.get('link', 'N/A'))))
         l2 = clean_md(str(sub.get('link2', 'N/A')))
         name = clean_md(str(sub.get('user_name', 'Unknown')))
@@ -1714,7 +1733,7 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
         if len(l2) > 200: l2 = l2[:197] + "..."
         
         caption1 = (
-            f"👤 **User:** {name}\n"
+            f"👤 **User:** {name} - ₹{balance}\n"
             f"🆔 **ID:** `{sub.get('user_id')}`\n"
             f"📌 **Status:** UNMARKED ({skip + 1} of {total_pending})\n\n"
             f"🔗 **First Profile:** {l1}"
@@ -1869,6 +1888,10 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
         sub = subs_list[0]
         status = "✅ ACCEPTED" if sub.get("status") == "accepted" else "❌ DENIED"
         
+        # Getting the user's current balance to display right next to the name
+        user_doc = await users_col.find_one({"user_id": user_id})
+        balance = user_doc.get("balance", 0) if user_doc else 0
+        
         l1 = clean_md(str(sub.get('link1', sub.get('link', 'N/A'))))
         l2 = clean_md(str(sub.get('link2', 'N/A')))
         name = clean_md(str(sub.get('user_name', 'Unknown')))
@@ -1877,7 +1900,7 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
         if len(l2) > 200: l2 = l2[:197] + "..."
         
         caption1 = (
-            f"👤 **User:** {name}\n"
+            f"👤 **User:** {name} - ₹{balance}\n"
             f"🆔 **ID:** `{sub.get('user_id')}`\n"
             f"📌 **Status:** {status} ({skip + 1} of {total_marked})\n"
             f"🕒 **Time:** {sub.get('timestamp').strftime('%d %b, %I:%M %p')}\n\n"
@@ -2177,7 +2200,7 @@ async def admin_add_user_save(message: Message, state: FSMContext, bot: Bot) -> 
             
         if user:
             final_name = user.get("first_name", query)
-            await message.reply(f"✅ User **{final_name}** is now an ACTIVE member! (Processing in bg)", reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
+            await message.reply(f"✅ User **{clean_md(final_name)}** is now an ACTIVE member! (Processing in bg)", reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
             
             async def update_existing_user():
                 await users_col.update_one(
@@ -2194,7 +2217,7 @@ async def admin_add_user_save(message: Message, state: FSMContext, bot: Bot) -> 
             new_username = username if username else (query if not is_digit else "")
             new_name = name if name else query
             
-            success_msg = f"✅ User `{query}` has been **pre-approved** and added to Active Members!\n(Processing in background)"
+            success_msg = f"✅ User `{clean_md(query)}` has been **pre-approved** and added to Active Members!\n(Processing in background)"
             await message.reply(success_msg, reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
             
             async def insert_new_user():
@@ -2261,7 +2284,7 @@ async def admin_check_user_result(message: Message, state: FSMContext) -> None:
         users = await users_col.find(db_query).to_list(5)
         
         if not users:
-            await message.reply(f"⚠️ No user found for `{query}`.", reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
+            await message.reply(f"⚠️ No user found for `{clean_md(query)}`.", reply_markup=await get_admin_panel_keyboard(), parse_mode="Markdown")
             await state.clear()
             return
             
@@ -2270,8 +2293,8 @@ async def admin_check_user_result(message: Message, state: FSMContext) -> None:
             status = "✅ Active" if u.get("is_active") else ("🚫 Banned" if u.get("is_banned") else "⚪ Inactive")
             text = (
                 f"👤 **User Info:**\n\n"
-                f"**Name:** {u.get('first_name')}\n"
-                f"**Username:** @{u.get('username', 'N/A')}\n"
+                f"**Name:** {clean_md(u.get('first_name'))}\n"
+                f"**Username:** @{clean_md(u.get('username', 'N/A'))}\n"
                 f"**ID:** `{u.get('user_id')}`\n"
                 f"**Status:** {status}\n"
                 f"**Balance:** ₹{u.get('balance', 0)}\n"
@@ -2340,6 +2363,7 @@ async def admin_currently_users(callback: CallbackQuery) -> None:
             
         kb = InlineKeyboardBuilder()
         for u in real_users:
+            # Inline button format allows generic string
             name = u.get("first_name", "User")
             uid = u.get("user_id")
             kb.button(text=f"👤 {name}", callback_data=f"manage_user_{uid}")
@@ -2354,7 +2378,7 @@ async def admin_currently_users(callback: CallbackQuery) -> None:
             kb.row(*nav_row)
             
         kb.row(InlineKeyboardButton(text="« Back", callback_data="admin_cancel"))
-        kb.adjust(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1) # Auto-adjustment for buttons
+        kb.adjust(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1) 
         
         text = f"👥 **Currently Assigned Users (Page {page+1})**\nTotal Assigned: {total_users}\n\nSelect a user below to view their work profile and manage balance:"
         await safe_edit_message(callback, text, kb.as_markup())
@@ -2374,28 +2398,33 @@ async def admin_manage_specific_user(callback: CallbackQuery) -> None:
         subs_count = u.get('submission_count', 0)
         balance = u.get('balance', 0)
         
-        # Fetching latest 2 submitted links
+        # Securing markdown names to fix active user panel crash
+        name_clean = clean_md(u.get("first_name", "User"))
+        
         subs_cursor = submissions_col.find({"user_id": uid}).sort("timestamp", -1).limit(2)
         recent_subs = await subs_cursor.to_list(length=2)
         
         link_text = "None"
         last_sub_name = "None"
+        
         if recent_subs:
-            last_sub_name = recent_subs[0].get("user_name", u.get("first_name"))
+            # Fixing markdown crash for the name submitted
+            last_sub_name = clean_md(str(recent_subs[0].get("user_name", u.get("first_name"))))
             link_text = ""
             for s in recent_subs:
-                l1 = s.get('link1', s.get('link', 'N/A'))
-                l2 = s.get('link2', 'N/A')
+                # Fixing markdown crash for submitted links containing underscores
+                l1 = clean_md(str(s.get('link1', s.get('link', 'N/A'))))
+                l2 = clean_md(str(s.get('link2', 'N/A')))
                 ts = s.get('timestamp', datetime.now()).strftime("%d %b, %I:%M %p")
                 link_text += f"\n🔹 [{ts}]\n   ├ {l1}\n   └ {l2}"
                 
-        # Calculate User Limit Status
         step = u.get("schedule_step", 0)
         work_approved = u.get("work_approved", True)
         limit_status = "🟢 Available/Open" if work_approved else "🔴 Limit Hit (Waiting for Admin Approval)"
         
+        # Markdown is safely constructed with clean_md() to fix crashes
         text = (
-            f"👤 **User Profile:** {u.get('first_name')}\n"
+            f"👤 **User Profile:** {name_clean}\n"
             f"🆔 **ID:** `{uid}`\n"
             f"💰 **Current Balance:** ₹{balance}\n"
             f"📥 **Total Work Submissions:** {subs_count}\n"
@@ -2707,10 +2736,8 @@ async def admin_balance_inquiry_handler(callback: CallbackQuery) -> None:
         ITEMS_PER_PAGE = 15
         skip_count = page * ITEMS_PER_PAGE
         
-        # Paginated for high speed
         total_users = await users_col.count_documents({}) 
         
-        # Using simple projection and limited skip/limit for lightning fast query
         users = await users_col.find(
             {}, 
             projection={"first_name": 1, "join_date": 1, "balance": 1, "submission_count": 1}
@@ -2731,10 +2758,10 @@ async def admin_balance_inquiry_handler(callback: CallbackQuery) -> None:
             bal = u.get("balance", 0)
             subs_count = u.get("submission_count", 0)
             
-            # Date aur Balance ke beech mein link ka logo, agar work submit kiya hai
             link_logo = " 🔗 " if subs_count > 0 else " "
             
-            text += f"👤 {name} | 📅 {day_str}{link_logo}₹{bal}\n"
+            # clean_md implemented here to fix crashes
+            text += f"👤 {clean_md(name)} | 📅 {day_str}{link_logo}₹{bal}\n"
             
         kb = InlineKeyboardBuilder()
         nav_row = []
@@ -2809,10 +2836,11 @@ async def admin_all_work_links(callback: CallbackQuery) -> None:
             name = s.get('user_name', 'Unknown')
             user_links = s.get('links', [])[:2]
             
-            text += f"👤 **{name}**\n"
+            # clean_md fixes crashes for Markdown issues
+            text += f"👤 **{clean_md(name)}**\n"
             for link_data in user_links:
-                l1 = link_data.get('l1', link_data.get('link', 'N/A'))
-                l2 = link_data.get('l2', 'N/A')
+                l1 = clean_md(str(link_data.get('l1', link_data.get('link', 'N/A'))))
+                l2 = clean_md(str(link_data.get('l2', 'N/A')))
                 ts_val = link_data.get('ts')
                 ts = ts_val.strftime("%d %b, %I:%M %p") if isinstance(ts_val, datetime) else "N/A"
                 text += f"🕒 Date: {ts}\n"
