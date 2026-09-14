@@ -1291,7 +1291,8 @@ async def admin_help_list(callback: CallbackQuery) -> None:
         queries = await help_queries_col.find({"status": "pending"}).sort("timestamp", 1).skip(skip_count).limit(ITEMS_PER_PAGE).to_list(length=ITEMS_PER_PAGE)
         
         if not queries and page == 0:
-            await callback.answer("✅ No pending help queries.", show_alert=True)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
+            await safe_edit_message(callback, "✅ No pending help queries.", kb)
             return
             
         kb = InlineKeyboardBuilder()
@@ -1327,7 +1328,8 @@ async def view_help_query(callback: CallbackQuery) -> None:
         
         query = await help_queries_col.find_one({"_id": ObjectId(qid)})
         if not query:
-            await callback.answer("⚠️ Query not found or already resolved.", show_alert=True)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data=f"admin_help_list_{page}")]])
+            await safe_edit_message(callback, "⚠️ Query not found or already resolved.", kb)
             return
             
         user_name = query.get("user_name", "Unknown")
@@ -1378,7 +1380,8 @@ async def reply_help_query_prompt(callback: CallbackQuery, state: FSMContext) ->
         query = await help_queries_col.find_one({"_id": ObjectId(qid)})
         
         if not query:
-            await callback.answer("⚠️ Query not found.", show_alert=True)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_help_list_0")]])
+            await safe_edit_message(callback, "⚠️ Query not found.", kb)
             return
             
         await state.set_state(AdminStates.waiting_for_help_reply)
@@ -1890,7 +1893,8 @@ async def admin_unmarked_subs(callback: CallbackQuery) -> None:
         grouped_subs = await subs_cursor.to_list(length=ITEMS_PER_PAGE)
         
         if not grouped_subs and page == 0:
-            await callback.answer("✅ No Unmarked (Pending) work submissions.", show_alert=True)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
+            await safe_edit_message(callback, "✅ No Unmarked (Pending) work submissions.", kb)
             return
             
         kb = InlineKeyboardBuilder()
@@ -1956,7 +1960,8 @@ async def admin_marked_subs(callback: CallbackQuery) -> None:
         grouped_subs = await subs_cursor.to_list(length=ITEMS_PER_PAGE)
         
         if not grouped_subs and page == 0:
-            await callback.answer("✅ No Marked work submissions found.", show_alert=True)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
+            await safe_edit_message(callback, "✅ No Marked work submissions found.", kb)
             return
             
         kb = InlineKeyboardBuilder()
@@ -1997,7 +2002,8 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
         total_pending = await submissions_col.count_documents({"user_id": user_id, "status": "pending"})
         
         if total_pending == 0:
-            await callback.answer("⚠️ No unmarked submissions remaining for this user.", show_alert=True)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_unmarked_subs_0")]])
+            await safe_edit_message(callback, "⚠️ No unmarked submissions remaining for this user.", kb)
             return
             
         if skip >= total_pending:
@@ -2163,7 +2169,8 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
         total_marked = await submissions_col.count_documents({"user_id": user_id, "status": {"$in": ["accepted", "denied"]}})
         
         if total_marked == 0:
-            await callback.answer("⚠️ History empty.", show_alert=True)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_marked_subs_0")]])
+            await safe_edit_message(callback, "⚠️ History empty.", kb)
             return
             
         if skip >= total_marked:
@@ -2241,7 +2248,8 @@ async def admin_skip_sub(callback: CallbackQuery, bot: Bot) -> None:
         sub = await submissions_col.find_one({"_id": ObjectId(sub_id)})
         
         if not sub or sub.get("status") != "pending":
-            await callback.answer("Submission already processed.", show_alert=True)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_unmarked_subs_0")]])
+            await safe_edit_message(callback, "⚠️ Submission already processed or not found.", kb)
             return
             
         user_id = sub["user_id"]
@@ -2281,7 +2289,8 @@ async def admin_accept_sub(callback: CallbackQuery, state: FSMContext) -> None:
         sub = await submissions_col.find_one({"_id": ObjectId(sub_id)})
         
         if not sub or sub.get("status") != "pending":
-            await callback.answer("Submission already processed.", show_alert=True)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_unmarked_subs_0")]])
+            await safe_edit_message(callback, "⚠️ Submission already processed or not found.", kb)
             return
             
         user_id = sub["user_id"]
@@ -2363,7 +2372,8 @@ async def admin_deny_sub(callback: CallbackQuery, state: FSMContext) -> None:
         sub = await submissions_col.find_one({"_id": ObjectId(sub_id)})
         
         if not sub or sub.get("status") != "pending":
-            await callback.answer("Submission already processed.", show_alert=True)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_unmarked_subs_0")]])
+            await safe_edit_message(callback, "⚠️ Submission already processed or not found.", kb)
             return
             
         user_id = sub["user_id"]
@@ -2662,7 +2672,8 @@ async def admin_currently_users(callback: CallbackQuery) -> None:
         real_users = await users_col.find({"is_active": True}).skip(skip_count).limit(ITEMS_PER_PAGE).to_list(length=ITEMS_PER_PAGE)
         
         if not real_users and page == 0:
-            await callback.answer("No active assigned users found.", show_alert=True)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
+            await safe_edit_message(callback, "⚠️ No active assigned users found.", kb)
             return
             
         kb = InlineKeyboardBuilder()
@@ -2695,7 +2706,8 @@ async def admin_manage_specific_user(callback: CallbackQuery) -> None:
         uid = int(callback.data.split("_")[-1])
         u = await users_col.find_one({"user_id": uid})
         if not u:
-            await callback.answer("User not found.", show_alert=True)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_currently_users_0")]])
+            await safe_edit_message(callback, "⚠️ User not found.", kb)
             return
             
         subs_count = u.get('submission_count', 0)
