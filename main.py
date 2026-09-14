@@ -53,6 +53,7 @@ users_col: AgnosticCollection = db["users"]
 submissions_col: AgnosticCollection = db["submissions"]
 settings_col: AgnosticCollection = db["settings"]
 dp_texts_col: AgnosticCollection = db["dp_texts"] 
+help_queries_col: AgnosticCollection = db["help_queries"] # NEW: Collection for Help Support
 
 # ==========================================
 # MONGODB MEDIA STORAGE 
@@ -361,6 +362,9 @@ class WithdrawStates(StatesGroup):
     waiting_for_upi = State()
     waiting_for_crypto = State()
 
+class StaffHelpStates(StatesGroup):
+    waiting_for_message = State()
+
 class AdminStates(StatesGroup):
     waiting_for_work_link = State()
     waiting_for_proof_link = State()
@@ -379,6 +383,7 @@ class AdminStates(StatesGroup):
     waiting_for_dump_total_videos = State()
     waiting_for_dp_storage_media = State()
     waiting_for_dp_bank_media = State()
+    waiting_for_help_reply = State()
 
 # ==========================================
 # KEYBOARDS
@@ -435,7 +440,7 @@ async def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="🔍 Check User", callback_data="admin_check_user"),
-                InlineKeyboardButton(text="📥 Set Dump Channel", callback_data="admin_set_dump_channel") 
+                InlineKeyboardButton(text="📥 Set Dump", callback_data="admin_set_dump_channel") 
             ],
             [
                 InlineKeyboardButton(text="📝 Unmarked Subs", callback_data="admin_unmarked_subs_0"), 
@@ -447,21 +452,22 @@ async def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="💰 Balance Inquiry", callback_data="admin_balance_inquiry_0"),
-                InlineKeyboardButton(text="🔗 User Work Links", callback_data="admin_work_links_0")
+                InlineKeyboardButton(text="🔗 Work Links", callback_data="admin_work_links_0")
             ],
             [
-                InlineKeyboardButton(text="👑 Manage Admins", callback_data="admin_manage_admins"),
-                InlineKeyboardButton(text="🔗 Set Work Link", callback_data="admin_set_work")
+                InlineKeyboardButton(text="🆘 Help Queries", callback_data="admin_help_list_0"),
+                InlineKeyboardButton(text="👑 Manage Admins", callback_data="admin_manage_admins")
             ],
             [
-                InlineKeyboardButton(text="🔗 Set Proof Link", callback_data="admin_set_proof"),
-                InlineKeyboardButton(text="💾 Backup Database", callback_data="admin_backup")
+                InlineKeyboardButton(text="🔗 Set Work Link", callback_data="admin_set_work"),
+                InlineKeyboardButton(text="🔗 Set Proof Link", callback_data="admin_set_proof")
             ],
             [
                 InlineKeyboardButton(text=maintenance_text, callback_data="admin_toggle_maintenance"),
-                InlineKeyboardButton(text="❌ Close Panel", callback_data="admin_close")
+                InlineKeyboardButton(text="💾 Backup DB", callback_data="admin_backup")
             ],
             [
+                InlineKeyboardButton(text="❌ Close Panel", callback_data="admin_close"),
                 InlineKeyboardButton(text="🏠 Main Panel", callback_data="back_to_menu")
             ]
         ]
@@ -543,6 +549,7 @@ async def show_withdrawal_list(callback: CallbackQuery) -> None:
 async def show_active_members(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
+        # FIXED: Typo from original code "fromuser" to "from_user" so actual user name loads
         user = await get_user(callback.from_user.id)
         is_active_user = user.get("is_active", False) if user else False
         current_user_name = clean_md(user.get("first_name", "User")) if is_active_user else None
@@ -708,11 +715,11 @@ async def staff_only_menu(callback: CallbackQuery) -> None:
             
         await callback.answer()
         
-        # Exact 3 buttons as requested by user
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🆕 New Work", callback_data="request_new_work")],
             [InlineKeyboardButton(text="📤 Submit Work", callback_data="submit_work_dashboard")],
             [InlineKeyboardButton(text="💰 Today Balance", callback_data="staff_today_balance")],
+            [InlineKeyboardButton(text="🆘 Help", callback_data="staff_help")],
             [InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]
         ])
         
@@ -720,6 +727,35 @@ async def staff_only_menu(callback: CallbackQuery) -> None:
         await safe_edit_message(callback, text, kb)
     except Exception as e:
         logger.error(f"Error in staff_only_menu: {e}")
+
+@router.callback_query(F.data == "staff_help")
+async def staff_help_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await callback.answer()
+        await state.set_state(StaffHelpStates.waiting_for_message)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="staff_only_menu")]])
+        text = "🆘 **Help & Support**\n\nPlease type your message or send a photo with a caption describing your issue. Admin will check and reply shortly."
+        await safe_edit_message(callback, text, kb)
+    except Exception as e:
+        logger.error(f"Error in staff_help_prompt: {e}")
+
+@router.message(StaffHelpStates.waiting_for_message)
+async def receive_help_message(message: Message, state: FSMContext) -> None:
+    try:
+        query_doc = {
+            "user_id": message.from_user.id,
+            "user_name": clean_md(message.from_user.first_name),
+            "message_id": message.message_id,
+            "text": message.text or message.caption or "[Media Message]",
+            "status": "pending",
+            "timestamp": datetime.now()
+        }
+        await help_queries_col.insert_one(query_doc)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Dashboard", callback_data="staff_only_menu")]])
+        await message.reply("✅ **Your query has been sent to the Admin!**\n\nPlease wait for a reply.", reply_markup=kb)
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Error receiving help message: {e}")
 
 @router.callback_query(F.data == "staff_today_balance")
 async def staff_today_balance(callback: CallbackQuery) -> None:
@@ -762,13 +798,13 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         approval_date = user.get("approval_date") or user.get("join_date", datetime.now())
         now = datetime.now()
         
-        # UPGRADED: Independent cooldown logic. Strictly time-based limit (4h), ignoring manual admin approval status.
+        # UPGRADED: Independent cooldown logic. Strictly time-based (4h/6h/8h), ignoring manual admin approval status.
         if step == 0:
-            # First time user: 2 hours limit from approval/join date
-            next_allowed = approval_date + timedelta(hours=2)
+            next_allowed = approval_date + timedelta(hours=4)
+        elif step == 1:
+            next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now + timedelta(hours=6)
         else:
-            # Every subsequent use: exactly 4 hours from last work fetch
-            next_allowed = last_work_time + timedelta(hours=4) if last_work_time else now + timedelta(hours=4)
+            next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now + timedelta(hours=8)
 
         if next_allowed and now < next_allowed:
             wait_time = next_allowed - now
@@ -776,9 +812,11 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             minutes, _ = divmod(remainder, 60)
             
             if step == 0:
-                msg = f"⏳ 2 Hour Initial Limit Block!\n\nYour limit opens in {hours} hours and {minutes} minutes.\n\nPlease retry after this time to get your first work."
+                msg = f"⏳ 4 Hour Limit Block!\n\nYour limit opens in {hours} hours and {minutes} minutes.\n\nPlease retry after this time to get your new work."
+            elif step == 1:
+                msg = f"⏳ 6 Hour Limit Block!\n\n{hours} hours and {minutes} minutes remaining until your next batch limit opens."
             else:
-                msg = f"⏳ 4 Hour Limit Block!\n\n{hours} hours and {minutes} minutes remaining until your next batch limit opens."
+                msg = f"⏳ 8 Hour Limit Block!\n\n{hours} hours and {minutes} minutes remaining until your next batch limit opens."
                 
             await callback.answer(msg, show_alert=True)
             return
@@ -1130,6 +1168,144 @@ async def admin_show_stats(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error(f"Error in admin_stats: {e}")
 
+# --- NEW HELP QUERIES LOGIC ---
+@router.callback_query(F.data.startswith("admin_help_list_"))
+async def admin_help_list(callback: CallbackQuery) -> None:
+    try:
+        await callback.answer()
+        page = int(callback.data.split("_")[-1])
+        ITEMS_PER_PAGE = 10
+        skip_count = page * ITEMS_PER_PAGE
+        
+        total_queries = await help_queries_col.count_documents({"status": "pending"})
+        queries = await help_queries_col.find({"status": "pending"}).sort("timestamp", 1).skip(skip_count).limit(ITEMS_PER_PAGE).to_list(length=ITEMS_PER_PAGE)
+        
+        if not queries and page == 0:
+            await callback.answer("✅ No pending help queries.", show_alert=True)
+            return
+            
+        kb = InlineKeyboardBuilder()
+        for q in queries:
+            name = q.get("user_name", "User")
+            qid = str(q["_id"])
+            kb.button(text=f"🆘 {name}", callback_data=f"view_help_query_{qid}_{page}")
+        
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"admin_help_list_{page-1}"))
+        if skip_count + ITEMS_PER_PAGE < total_queries:
+            nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"admin_help_list_{page+1}"))
+        
+        if nav_row:
+            kb.row(*nav_row)
+            
+        kb.row(InlineKeyboardButton(text="« Back", callback_data="admin_cancel"))
+        kb.adjust(1)
+        
+        text = f"🆘 **Pending Help Queries (Page {page+1}):**\nSelect a user to view their request and reply:"
+        await safe_edit_message(callback, text, kb.as_markup())
+    except Exception as e:
+        logger.error(f"Error in admin_help_list: {e}")
+
+@router.callback_query(F.data.startswith("view_help_query_"))
+async def view_help_query(callback: CallbackQuery) -> None:
+    try:
+        await callback.answer()
+        parts = callback.data.split("_")
+        qid = parts[3]
+        page = int(parts[4]) if len(parts) > 4 else 0
+        
+        query = await help_queries_col.find_one({"_id": ObjectId(qid)})
+        if not query:
+            await callback.answer("⚠️ Query not found or already resolved.", show_alert=True)
+            return
+            
+        user_name = query.get("user_name", "Unknown")
+        user_id = query.get("user_id", "Unknown")
+        q_text = query.get("text", "No text provided.")
+        ts = query.get("timestamp", datetime.now()).strftime("%d %b, %I:%M %p")
+        
+        text = (
+            f"🆘 **Help Query Details**\n\n"
+            f"👤 **User:** {user_name}\n"
+            f"🆔 **ID:** `{user_id}`\n"
+            f"🕒 **Time:** {ts}\n\n"
+            f"📝 **Message:**\n{q_text}"
+        )
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💬 Reply to User", callback_data=f"reply_help_query_{qid}")],
+            [InlineKeyboardButton(text="✅ Mark as Resolved", callback_data=f"resolve_help_query_{qid}_{page}")],
+            [InlineKeyboardButton(text="« Back to List", callback_data=f"admin_help_list_{page}")]
+        ])
+        
+        await safe_edit_message(callback, text, kb)
+    except Exception as e:
+        logger.error(f"Error viewing help query: {e}")
+
+@router.callback_query(F.data.startswith("resolve_help_query_"))
+async def resolve_help_query(callback: CallbackQuery) -> None:
+    try:
+        parts = callback.data.split("_")
+        qid = parts[3]
+        page = parts[4]
+        
+        await help_queries_col.update_one({"_id": ObjectId(qid)}, {"$set": {"status": "resolved"}})
+        await callback.answer("✅ Query marked as resolved!", show_alert=True)
+        
+        # Mocking callback to jump back to list seamlessly
+        callback.data = f"admin_help_list_{page}"
+        await admin_help_list(callback)
+    except Exception as e:
+        logger.error(f"Error resolving help query: {e}")
+
+@router.callback_query(F.data.startswith("reply_help_query_"))
+async def reply_help_query_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await callback.answer()
+        qid = callback.data.split("_")[-1]
+        query = await help_queries_col.find_one({"_id": ObjectId(qid)})
+        
+        if not query:
+            await callback.answer("⚠️ Query not found.", show_alert=True)
+            return
+            
+        await state.set_state(AdminStates.waiting_for_help_reply)
+        await state.update_data(help_query_id=qid, help_user_id=query["user_id"])
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data=f"view_help_query_{qid}_0")]])
+        text = (
+            f"💬 **Reply to {query.get('user_name', 'User')}**\n\n"
+            f"Type your message below (or send a photo/video/voice). It will be sent directly to the user."
+        )
+        await safe_edit_message(callback, text, kb)
+    except Exception as e:
+        logger.error(f"Error prompting help reply: {e}")
+
+@router.message(AdminStates.waiting_for_help_reply)
+async def send_help_reply(message: Message, state: FSMContext, bot: Bot) -> None:
+    try:
+        data = await state.get_data()
+        uid = data.get("help_user_id")
+        qid = data.get("help_query_id")
+        
+        if not uid or not qid:
+            await message.reply("⚠️ Error: Session expired.", reply_markup=await get_admin_panel_keyboard())
+            await state.clear()
+            return
+            
+        await bot.send_message(uid, "📩 **Admin Reply to your Help Request:**")
+        await bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=message.message_id)
+        
+        await help_queries_col.update_one({"_id": ObjectId(qid)}, {"$set": {"status": "resolved"}})
+        
+        await message.reply("✅ **Reply sent successfully and query marked as resolved!**", reply_markup=await get_admin_panel_keyboard())
+        await state.clear()
+    except Exception as e:
+        logger.error(f"Error sending help reply: {e}")
+        await message.reply("⚠️ Failed to send reply. The user might have blocked the bot.", reply_markup=await get_admin_panel_keyboard())
+        await state.clear()
+
 # --- BACKUP SYSTEM LOGIC ---
 @router.callback_query(F.data == "admin_backup")
 async def admin_backup(callback: CallbackQuery, bot: Bot) -> None:
@@ -1468,7 +1644,6 @@ async def clear_dpbank(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error(f"Error in clear_dpbank: {e}")
 
-
 # --- SINGLE DUMP CHANNEL LOGIC ---
 @router.callback_query(F.data == "admin_set_dump_channel")
 async def admin_set_dump_channel_prompt(callback: CallbackQuery, state: FSMContext) -> None:
@@ -1609,7 +1784,6 @@ async def admin_unmarked_subs(callback: CallbackQuery) -> None:
             
         kb = InlineKeyboardBuilder()
         for s in grouped_subs:
-            # Inline button format allows raw text, so we add balance smoothly here.
             kb.button(text=f"📄 {s['user_name']} - ₹{s.get('balance', 0)} ({s['count']} subs)", callback_data=f"view_unmarked_{s['_id']}_0")
         
         nav_row = []
@@ -1861,7 +2035,6 @@ async def process_all_submission_balance(message: Message, state: FSMContext, bo
     except Exception as e:
         logger.error(f"Error adding all sub balance: {e}")
         await state.clear()
-
 
 @router.callback_query(F.data.startswith("view_marked_"))
 async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
@@ -2380,7 +2553,6 @@ async def admin_currently_users(callback: CallbackQuery) -> None:
             
         kb = InlineKeyboardBuilder()
         for u in real_users:
-            # Inline button format allows generic string
             name = u.get("first_name", "User")
             uid = u.get("user_id")
             kb.button(text=f"👤 {name}", callback_data=f"manage_user_{uid}")
@@ -2996,11 +3168,13 @@ async def work_notification_job(bot: Bot) -> None:
                 last_work_time = u.get("last_work_time")
                 next_allowed = None
                 
-                # UPGRADED: Naya user = 2 ghante ki limit. Purana user = 4 ghante ki limit.
                 if step == 0:
-                    next_allowed = approval_date + timedelta(hours=2)
+                    next_allowed = approval_date + timedelta(hours=4)
+                elif step == 1:
+                    # Upgrade: Notify bas time poora hone pe
+                    next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now + timedelta(hours=6)
                 else:
-                    next_allowed = last_work_time + timedelta(hours=4) if last_work_time else now + timedelta(hours=4)
+                    next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now + timedelta(hours=8)
                 
                 if next_allowed and now >= next_allowed:
                     try:
