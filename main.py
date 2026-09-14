@@ -543,7 +543,7 @@ async def show_withdrawal_list(callback: CallbackQuery) -> None:
 async def show_active_members(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
-        user = await get_user(callback.fromuser.id)
+        user = await get_user(callback.from_user.id)
         is_active_user = user.get("is_active", False) if user else False
         current_user_name = clean_md(user.get("first_name", "User")) if is_active_user else None
 
@@ -762,13 +762,13 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         approval_date = user.get("approval_date") or user.get("join_date", datetime.now())
         now = datetime.now()
         
-        # UPGRADED: Independent cooldown logic. Strictly time-based (4h/6h/8h), ignoring manual admin approval status.
+        # UPGRADED: Independent cooldown logic. Strictly time-based limit (4h), ignoring manual admin approval status.
         if step == 0:
-            next_allowed = approval_date + timedelta(hours=4)
-        elif step == 1:
-            next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now + timedelta(hours=6)
+            # First time user: 2 hours limit from approval/join date
+            next_allowed = approval_date + timedelta(hours=2)
         else:
-            next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now + timedelta(hours=8)
+            # Every subsequent use: exactly 4 hours from last work fetch
+            next_allowed = last_work_time + timedelta(hours=4) if last_work_time else now + timedelta(hours=4)
 
         if next_allowed and now < next_allowed:
             wait_time = next_allowed - now
@@ -776,11 +776,9 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             minutes, _ = divmod(remainder, 60)
             
             if step == 0:
-                msg = f"⏳ 4 Hour Limit Block!\n\nYour limit opens in {hours} hours and {minutes} minutes.\n\nPlease retry after this time to get your new work."
-            elif step == 1:
-                msg = f"⏳ 6 Hour Limit Block!\n\n{hours} hours and {minutes} minutes remaining until your next batch limit opens."
+                msg = f"⏳ 2 Hour Initial Limit Block!\n\nYour limit opens in {hours} hours and {minutes} minutes.\n\nPlease retry after this time to get your first work."
             else:
-                msg = f"⏳ 8 Hour Limit Block!\n\n{hours} hours and {minutes} minutes remaining until your next batch limit opens."
+                msg = f"⏳ 4 Hour Limit Block!\n\n{hours} hours and {minutes} minutes remaining until your next batch limit opens."
                 
             await callback.answer(msg, show_alert=True)
             return
@@ -2998,13 +2996,11 @@ async def work_notification_job(bot: Bot) -> None:
                 last_work_time = u.get("last_work_time")
                 next_allowed = None
                 
+                # UPGRADED: Naya user = 2 ghante ki limit. Purana user = 4 ghante ki limit.
                 if step == 0:
-                    next_allowed = approval_date + timedelta(hours=4)
-                elif step == 1:
-                    # Upgrade: Notify bas time poora hone pe
-                    next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now + timedelta(hours=6)
+                    next_allowed = approval_date + timedelta(hours=2)
                 else:
-                    next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now + timedelta(hours=8)
+                    next_allowed = last_work_time + timedelta(hours=4) if last_work_time else now + timedelta(hours=4)
                 
                 if next_allowed and now >= next_allowed:
                     try:
