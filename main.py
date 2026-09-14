@@ -543,7 +543,7 @@ async def show_withdrawal_list(callback: CallbackQuery) -> None:
 async def show_active_members(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
-        user = await get_user(callback.from_user.id)
+        user = await get_user(callback.fromuser.id)
         is_active_user = user.get("is_active", False) if user else False
         current_user_name = clean_md(user.get("first_name", "User")) if is_active_user else None
 
@@ -752,19 +752,17 @@ async def staff_today_balance(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "request_new_work")
 async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
     try:
-        # NOTE: DO NOT answer callback initially to prevent pop-up block
         user = await get_user(callback.from_user.id)
         if not user or not user.get("is_active"):
             await callback.answer("🚫 Access Denied! This is for only our staff.", show_alert=True)
             return
 
         step = user.get("schedule_step", 0)
-        work_approved = user.get("work_approved", True)
         last_work_time = user.get("last_work_time")
         approval_date = user.get("approval_date") or user.get("join_date", datetime.now())
         now = datetime.now()
         
-        # New cooldown logic: 4-hour limit for first work, 6-hour for next, 8-hour for all subsequent
+        # UPGRADED: Independent cooldown logic. Strictly time-based (4h/6h/8h), ignoring manual admin approval status.
         if step == 0:
             next_allowed = approval_date + timedelta(hours=4)
         elif step == 1:
@@ -784,15 +782,7 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
             else:
                 msg = f"⏳ 8 Hour Limit Block!\n\n{hours} hours and {minutes} minutes remaining until your next batch limit opens."
                 
-            if step > 0 and not work_approved:
-                msg += "\n\n⚠️ Tell Admin To Approve Your Pending Work."
-                
-            # Safely triggers exact pop-up
             await callback.answer(msg, show_alert=True)
-            return
-
-        if step > 0 and not work_approved:
-            await callback.answer("⚠️ Your previous work has not been approved yet. Tell Admin To Approve Your Pending Work.", show_alert=True)
             return
 
         # Safe to show processing state now that limits are passed
@@ -821,24 +811,29 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         
         selected_batches = random.sample(available_batches, actual_batches)
         
+        # UPGRADED: Robust video counting to guarantee EXACTLY 12 videos are delivered, skipping broken/deleted items.
         for idx, batch_idx in enumerate(selected_batches, 1):
             await callback.message.answer(f"📦 **Batch {idx}**")
             
             start_msg_id = base_msg_id + (batch_idx * 6)
             success_count = 0
+            attempts = 0
+            current_msg_id = start_msg_id
             
-            for i in range(6):
+            while success_count < 6 and attempts < 15: # Loop ensures exact 6 valid fetches
                 try:
                     await bot.copy_message(
                         chat_id=callback.from_user.id,
                         from_chat_id=chat_id,
-                        message_id=start_msg_id + i
+                        message_id=current_msg_id
                     )
                     success_count += 1
-                    # Slightly increased sleep to completely prevent flood wait for 12 rapid videos
                     await asyncio.sleep(0.5) 
                 except Exception as e:
-                    logger.warning(f"Failed to copy msg {start_msg_id + i} from {chat_id}: {e}")
+                    logger.warning(f"Failed to copy msg {current_msg_id} from {chat_id}: {e}")
+                
+                current_msg_id += 1
+                attempts += 1
             
             if success_count == 0:
                 await callback.message.answer("⚠️ *Could not fetch videos for this batch.*", parse_mode="Markdown")
@@ -914,7 +909,7 @@ async def submit_work_dashboard_start(callback: CallbackQuery, state: FSMContext
             await callback.answer("🚫 Access Denied!", show_alert=True)
             return
 
-        # UPGRADED: 4-hour limit rule logic for work submission
+        # 4-hour limit logic for work submission (Operates independently of admin approval)
         last_sub = await submissions_col.find_one(
             {"user_id": callback.from_user.id}, 
             sort=[("timestamp", -1)]
@@ -1725,7 +1720,8 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
         if skip >= total_pending:
             skip = 0
             
-        subs_list = await submissions_col.find({"user_id": user_id, "status": "pending"}).sort("timestamp", 1).skip(skip).limit(1).to_list(1)
+        # UPGRADED: sort("timestamp", -1) - Newest work first check
+        subs_list = await submissions_col.find({"user_id": user_id, "status": "pending"}).sort("timestamp", -1).skip(skip).limit(1).to_list(1)
         
         if not subs_list:
             await callback.answer("⚠️ Could not load submission.", show_alert=True)
@@ -1891,6 +1887,7 @@ async def admin_view_marked_sub(callback: CallbackQuery, bot: Bot) -> None:
         if skip >= total_marked:
             skip = 0
 
+        # UPGRADED: sort("timestamp", -1) - Already newest first here
         subs_list = await submissions_col.find({"user_id": user_id, "status": {"$in": ["accepted", "denied"]}}).sort("timestamp", -1).skip(skip).limit(1).to_list(1)
         
         if not subs_list:
@@ -3004,11 +3001,10 @@ async def work_notification_job(bot: Bot) -> None:
                 if step == 0:
                     next_allowed = approval_date + timedelta(hours=4)
                 elif step == 1:
-                    if work_approved:
-                        next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now + timedelta(hours=6)
+                    # Upgrade: Notify bas time poora hone pe
+                    next_allowed = last_work_time + timedelta(hours=6) if last_work_time else now + timedelta(hours=6)
                 else:
-                    if work_approved:
-                        next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now + timedelta(hours=8)
+                    next_allowed = last_work_time + timedelta(hours=8) if last_work_time else now + timedelta(hours=8)
                 
                 if next_allowed and now >= next_allowed:
                     try:
