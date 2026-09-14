@@ -53,7 +53,7 @@ users_col: AgnosticCollection = db["users"]
 submissions_col: AgnosticCollection = db["submissions"]
 settings_col: AgnosticCollection = db["settings"]
 dp_texts_col: AgnosticCollection = db["dp_texts"] 
-help_queries_col: AgnosticCollection = db["help_queries"] # NEW: Collection for Help Support
+help_queries_col: AgnosticCollection = db["help_queries"]
 
 # ==========================================
 # MONGODB MEDIA STORAGE 
@@ -222,7 +222,7 @@ async def get_daily_withdrawals() -> Tuple[List[Dict[str, Any]], int, int]:
     crypto_indices = random.sample(range(num_today), min(random.randint(2, 3), num_today))
     zero_indices = random.sample(range(num_today), min(random.randint(2, 3), num_today))
     
-    # UPGRADED: Spread evenly across the entire 24 hour day (0 to 23) to ensure morning updates
+    # Spread evenly across the entire 24 hour day (0 to 23) to ensure morning updates
     times = []
     for _ in range(num_today):
         times.append(time(random.randint(0, 23), random.randint(0, 59)))
@@ -292,11 +292,18 @@ async def register_user_if_not_exists(user_id: int, username: str, first_name: s
     try:
         existing_by_id = await users_col.find_one({"user_id": user_id})
         if existing_by_id:
+            update_fields = {}
             if existing_by_id.get("first_name") == str(user_id) or not existing_by_id.get("username"):
-                await users_col.update_one(
-                    {"user_id": user_id},
-                    {"$set": {"username": username, "first_name": first_name}}
-                )
+                update_fields["username"] = username
+                update_fields["first_name"] = first_name
+            # Ensure everyone gets an employee ID eventually
+            if not existing_by_id.get("emp_id"):
+                update_fields["emp_id"] = f"EMP-{random.randint(10000, 99999)}"
+            if "tc_accepted" not in existing_by_id:
+                update_fields["tc_accepted"] = False
+                
+            if update_fields:
+                await users_col.update_one({"user_id": user_id}, {"$set": update_fields})
             return
 
         existing_by_username = None
@@ -306,7 +313,12 @@ async def register_user_if_not_exists(user_id: int, username: str, first_name: s
         if existing_by_username and existing_by_username.get("user_id") == 0:
             await users_col.update_one(
                 {"_id": existing_by_username["_id"]},
-                {"$set": {"user_id": user_id, "first_name": first_name}}
+                {"$set": {
+                    "user_id": user_id, 
+                    "first_name": first_name,
+                    "emp_id": f"EMP-{random.randint(10000, 99999)}",
+                    "tc_accepted": False
+                }}
             )
             return
 
@@ -316,6 +328,8 @@ async def register_user_if_not_exists(user_id: int, username: str, first_name: s
             "first_name": first_name,
             "is_active": False,
             "is_banned": False,
+            "emp_id": f"EMP-{random.randint(10000, 99999)}",
+            "tc_accepted": False,
             "balance": 0,
             "submission_count": 0,
             "join_date": datetime.now(),
@@ -549,7 +563,6 @@ async def show_withdrawal_list(callback: CallbackQuery) -> None:
 async def show_active_members(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
-        # FIXED: Typo from original code "fromuser" to "from_user" so actual user name loads
         user = await get_user(callback.from_user.id)
         is_active_user = user.get("is_active", False) if user else False
         current_user_name = clean_md(user.get("first_name", "User")) if is_active_user else None
@@ -622,7 +635,7 @@ async def request_withdrawal(callback: CallbackQuery) -> None:
                 InlineKeyboardButton(text="🏦 UPI", callback_data="withdraw_method_upi"),
                 InlineKeyboardButton(text="🪙 Crypto", callback_data="withdraw_method_crypto")
             ],
-            [InlineKeyboardButton(text="« Back", callback_data="staff_today_balance")]
+            [InlineKeyboardButton(text="« Back", callback_data="staff_my_section")]
         ])
         
         await safe_edit_message(callback, text, kb)
@@ -704,6 +717,16 @@ async def process_withdraw_crypto(message: Message, state: FSMContext) -> None:
 # STAFF WORK & SUBMISSION FLOW (FSM)
 # ==========================================
 
+@router.callback_query(F.data == "accept_tc")
+async def accept_tc_handler(callback: CallbackQuery) -> None:
+    try:
+        await users_col.update_one({"user_id": callback.from_user.id}, {"$set": {"tc_accepted": True}})
+        await callback.answer("✅ Terms & Conditions Accepted! Welcome to the team.", show_alert=True)
+        # Re-trigger the staff menu logic directly
+        await staff_only_menu(callback)
+    except Exception as e:
+        logger.error(f"Error in accept_tc_handler: {e}")
+
 @router.callback_query(F.data == "staff_only_menu")
 async def staff_only_menu(callback: CallbackQuery) -> None:
     try:
@@ -713,13 +736,39 @@ async def staff_only_menu(callback: CallbackQuery) -> None:
             await callback.answer("🚫 Access Denied!\n\nYou are not in staff.", show_alert=True)
             return
             
+        # Check if T&C is accepted
+        if not user.get("tc_accepted", False):
+            emp_id = user.get("emp_id", f"EMP-{random.randint(10000, 99999)}")
+            if "emp_id" not in user:
+                await users_col.update_one({"user_id": callback.from_user.id}, {"$set": {"emp_id": emp_id}})
+            
+            tc_text = (
+                f"🏢 **Corporate Onboarding**\n\n"
+                f"👤 **Employee ID:** `{emp_id}`\n\n"
+                f"📜 **Terms & Conditions:**\n"
+                f"1. Payments are provided within 96 hours of withdrawal request.\n"
+                f"2. A minimum balance of ₹3,000 is required for withdrawal.\n"
+                f"3. You must post Instagram stories daily as instructed.\n"
+                f"4. If your Instagram account gets suspended, do not worry. We will still pay you for your work, and you can replace it with a new account.\n\n"
+                f"Please accept these terms to continue to your dashboard."
+            )
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ I have agree with this terms and condition", callback_data="accept_tc")],
+                [InlineKeyboardButton(text="« Cancel", callback_data="back_to_menu")]
+            ])
+            await safe_edit_message(callback, tc_text, kb)
+            return
+
         await callback.answer()
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🆕 New Work", callback_data="request_new_work")],
             [InlineKeyboardButton(text="📤 Submit Work", callback_data="submit_work_dashboard")],
-            [InlineKeyboardButton(text="💰 Today Balance", callback_data="staff_today_balance")],
-            [InlineKeyboardButton(text="🆘 Help", callback_data="staff_help")],
+            [InlineKeyboardButton(text="👤 My Section", callback_data="staff_my_section")],
+            [
+                InlineKeyboardButton(text="🆘 Help", callback_data="staff_help"),
+                InlineKeyboardButton(text="❓ FAQ", callback_data="staff_faq")
+            ],
             [InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]
         ])
         
@@ -727,6 +776,22 @@ async def staff_only_menu(callback: CallbackQuery) -> None:
         await safe_edit_message(callback, text, kb)
     except Exception as e:
         logger.error(f"Error in staff_only_menu: {e}")
+
+@router.callback_query(F.data == "staff_faq")
+async def staff_faq_handler(callback: CallbackQuery) -> None:
+    try:
+        await callback.answer()
+        text = (
+            "❓ **Frequently Asked Questions (FAQ)**\n\n"
+            "**Q1: When will my payment arrive?**\n"
+            "A: We process payments within 96 hours of placing a withdrawal request. The minimum balance required to place a request is ₹3,000.\n\n"
+            "**Q2: Why does an account get banned or suspended?**\n"
+            "A: Sometimes Instagram's automated system detects repetitive actions as bot behavior. If this happens, don't panic. You will still be paid for your completed work, and you can just replace the banned account with a new one to continue working."
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Dashboard", callback_data="staff_only_menu")]])
+        await safe_edit_message(callback, text, kb)
+    except Exception as e:
+        logger.error(f"Error in staff_faq_handler: {e}")
 
 @router.callback_query(F.data == "staff_help")
 async def staff_help_prompt(callback: CallbackQuery, state: FSMContext) -> None:
@@ -742,23 +807,27 @@ async def staff_help_prompt(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(StaffHelpStates.waiting_for_message)
 async def receive_help_message(message: Message, state: FSMContext) -> None:
     try:
+        tkt_id = random.randint(10000, 99999)
         query_doc = {
             "user_id": message.from_user.id,
             "user_name": clean_md(message.from_user.first_name),
             "message_id": message.message_id,
             "text": message.text or message.caption or "[Media Message]",
             "status": "pending",
+            "ticket_id": tkt_id,
             "timestamp": datetime.now()
         }
         await help_queries_col.insert_one(query_doc)
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Dashboard", callback_data="staff_only_menu")]])
-        await message.reply("✅ **Your query has been sent to the Admin!**\n\nPlease wait for a reply.", reply_markup=kb)
+        
+        reply_msg = f"✅ **Your support ticket #TKT-{tkt_id} has been created.**\n\nOur HR team will reply within 12-24 hours."
+        await message.reply(reply_msg, reply_markup=kb)
         await state.clear()
     except Exception as e:
         logger.error(f"Error receiving help message: {e}")
 
-@router.callback_query(F.data == "staff_today_balance")
-async def staff_today_balance(callback: CallbackQuery) -> None:
+@router.callback_query(F.data == "staff_my_section")
+async def staff_my_section(callback: CallbackQuery) -> None:
     try:
         await callback.answer()
         user = await get_user(callback.from_user.id)
@@ -768,11 +837,14 @@ async def staff_today_balance(callback: CallbackQuery) -> None:
             return
 
         balance = user.get("balance", 0)
+        emp_id = user.get("emp_id", "N/A")
         
         text = (
-            f"📊 **Today Balance Overview**\n\n"
-            f"👤 Staff Member: {clean_md(callback.from_user.first_name)}\n"
-            f"💸 Current Total Earnings: ₹{balance:,}\n\n"
+            f"👤 **My Section**\n\n"
+            f"📛 **Name:** {clean_md(callback.from_user.first_name)}\n"
+            f"🆔 **Employee ID:** `{emp_id}`\n"
+            f"🔢 **Telegram ID:** `{callback.from_user.id}`\n"
+            f"💸 **Total Balance:** ₹{balance:,}\n\n"
             f"*(You can request a withdrawal below once minimum limits and hours are met)*"
         )
         
@@ -783,7 +855,7 @@ async def staff_today_balance(callback: CallbackQuery) -> None:
         
         await safe_edit_message(callback, text, kb)
     except Exception as e:
-        logger.error(f"Error in staff_today_balance: {e}")
+        logger.error(f"Error in staff_my_section: {e}")
 
 @router.callback_query(F.data == "request_new_work")
 async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
@@ -1224,9 +1296,10 @@ async def view_help_query(callback: CallbackQuery) -> None:
         user_id = query.get("user_id", "Unknown")
         q_text = query.get("text", "No text provided.")
         ts = query.get("timestamp", datetime.now()).strftime("%d %b, %I:%M %p")
+        ticket_id = query.get("ticket_id", "Unknown")
         
         text = (
-            f"🆘 **Help Query Details**\n\n"
+            f"🆘 **Help Query Details** (#TKT-{ticket_id})\n\n"
             f"👤 **User:** {user_name}\n"
             f"🆔 **ID:** `{user_id}`\n"
             f"🕒 **Time:** {ts}\n\n"
@@ -1294,7 +1367,7 @@ async def send_help_reply(message: Message, state: FSMContext, bot: Bot) -> None
             await state.clear()
             return
             
-        await bot.send_message(uid, "📩 **Admin Reply to your Help Request:**")
+        await bot.send_message(uid, "📩 **HR Team Reply to your Help Request:**")
         await bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=message.message_id)
         
         await help_queries_col.update_one({"_id": ObjectId(qid)}, {"$set": {"status": "resolved"}})
@@ -2417,6 +2490,8 @@ async def admin_add_user_save(message: Message, state: FSMContext, bot: Bot) -> 
                     "first_name": new_name,
                     "is_active": True,
                     "is_banned": False,
+                    "emp_id": f"EMP-{random.randint(10000, 99999)}",
+                    "tc_accepted": False,
                     "approval_date": datetime.now(),
                     "balance": 0,
                     "submission_count": 0,
@@ -2629,18 +2704,49 @@ async def admin_manage_specific_user(callback: CallbackQuery) -> None:
             ],
             [
                 InlineKeyboardButton(text="🔄 Update Balance", callback_data=f"updbal_{uid}"),
-                InlineKeyboardButton(text="✉️ Send Message", callback_data=f"msguser_{uid}")
+                InlineKeyboardButton(text="🔓 Open Limit", callback_data=f"openlimit_{uid}")
             ],
             [
-                InlineKeyboardButton(text="🗑️ Remove User", callback_data=f"rmuser_{uid}"),
-                InlineKeyboardButton(text="🚫 Ban Permanent", callback_data=f"banuser_{uid}")
+                InlineKeyboardButton(text="✉️ Send Message", callback_data=f"msguser_{uid}"),
+                InlineKeyboardButton(text="🗑️ Remove User", callback_data=f"rmuser_{uid}")
             ],
-            [InlineKeyboardButton(text="« Back", callback_data="admin_currently_users_0")]
+            [
+                InlineKeyboardButton(text="🚫 Ban Permanent", callback_data=f"banuser_{uid}"),
+                InlineKeyboardButton(text="« Back", callback_data="admin_currently_users_0")
+            ]
         ])
         
         await safe_edit_message(callback, text, kb)
     except Exception as e:
         logger.error(f"Error in manage_user: {e}")
+
+@router.callback_query(F.data.startswith("openlimit_"))
+async def admin_open_limit(callback: CallbackQuery, bot: Bot) -> None:
+    try:
+        uid = int(callback.data.split("_")[-1])
+        await users_col.update_one(
+            {"user_id": uid}, 
+            {"$set": {
+                "work_approved": True, 
+                "schedule_step": 0, 
+                "last_work_time": None, 
+                "has_submitted_current_work": True,
+                "pending_second_batch": False
+            }}
+        )
+        await callback.answer("✅ User limit successfully opened! They can take new work now.", show_alert=True)
+        
+        try:
+            await bot.send_message(uid, "🔓 **Good News!**\n\nYour work limit has been manually opened by the Admin. You can now request your next batch of work from the Staff Dashboard.")
+        except Exception:
+            pass
+        
+        # Refresh the profile view
+        callback.data = f"manage_user_{uid}"
+        await admin_manage_specific_user(callback)
+    except Exception as e:
+        logger.error(f"Error opening limit: {e}")
+        await callback.answer("⚠️ Error opening limit.", show_alert=True)
 
 @router.callback_query(F.data.startswith("rmuser_"))
 async def admin_remove_user(callback: CallbackQuery) -> None:
