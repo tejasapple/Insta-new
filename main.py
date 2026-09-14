@@ -436,6 +436,9 @@ def get_main_menu_keyboard(work_link: str, proof_link: str, is_admin: bool = Fal
             InlineKeyboardButton(text="👨‍💼 Staff Only", callback_data="staff_only_menu") 
         ],
         [
+            InlineKeyboardButton(text="❓ FAQ", callback_data="staff_faq") 
+        ],
+        [
             InlineKeyboardButton(text="💼 Apply to work", url=sanitize_url(work_link))
         ],
         [
@@ -780,10 +783,7 @@ async def staff_only_menu(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="🆕 New Work", callback_data="request_new_work")],
             [InlineKeyboardButton(text="📤 Submit Work", callback_data="submit_work_dashboard")],
             [InlineKeyboardButton(text="👤 My Section", callback_data="staff_my_section")],
-            [
-                InlineKeyboardButton(text="🆘 Help", callback_data="staff_help"),
-                InlineKeyboardButton(text="❓ FAQ", callback_data="staff_faq")
-            ],
+            [InlineKeyboardButton(text="🆘 Help", callback_data="staff_help")],
             [InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]
         ])
         
@@ -799,11 +799,15 @@ async def staff_faq_handler(callback: CallbackQuery) -> None:
         text = (
             "❓ **Frequently Asked Questions (FAQ)**\n\n"
             "**Q1: When will my payment arrive?**\n"
-            "A: We process payments within 96 hours of placing a withdrawal request. The minimum balance required to place a request is ₹3,000.\n\n"
-            "**Q2: Why does an account get banned or suspended?**\n"
-            "A: Sometimes Instagram's automated system detects repetitive actions as bot behavior. If this happens, don't panic. You will still be paid for your completed work, and you can just replace the banned account with a new one to continue working."
+            "A: We process payments in a minimum of 96 hours after your joining. A minimum balance of ₹3,000 is also required to place a withdrawal request.\n\n"
+            "**Q2: Why is the withdrawal 96 hours and minimum ₹3000?**\n"
+            "A: Many users make different profiles and get fake views and other fake joinings, which causes a loss to our company. Therefore, a minimum 4-day (96 hours) and 3k balance requirement is kept so that there is no cheating or fraudulent activity.\n\n"
+            "**Q3: Why does an account get banned or suspended?**\n"
+            "A: Sometimes Instagram's automated system detects repetitive actions as bot behavior. If this happens, don't panic. You will still be paid for your completed work, and you can just replace the banned account with a new one to continue working.\n\n"
+            "**Q4: How many reels do I need to upload per batch?**\n"
+            "A: You must upload exactly 12 reels per batch (6 for each of the two accounts) as provided in your new work section."
         )
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Dashboard", callback_data="staff_only_menu")]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Dashboard", callback_data="back_to_menu")]])
         await safe_edit_message(callback, text, kb)
     except Exception as e:
         logger.error(f"Error in staff_faq_handler: {e}")
@@ -933,6 +937,12 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
 
         # Safe to show processing state now that limits are passed
         await callback.answer("📥 Processing your work request...")
+        
+        # PREVENT SPAM CLICKING - Update DB lock immediately to prevent sending 15-16 videos
+        await users_col.update_one(
+            {"user_id": callback.from_user.id},
+            {"$set": {"last_work_time": now}}
+        )
 
         dump_settings = await settings_col.find_one({"_id": "dump_settings"})
         if not dump_settings:
@@ -951,6 +961,8 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
 
         if len(available_batches) < actual_batches:
             await callback.message.answer("⚠️ Not enough new unique videos available in the Dump Channel. Please contact Admin.")
+            # Revert the temporary lock if failed
+            await users_col.update_one({"user_id": callback.from_user.id}, {"$set": {"last_work_time": last_work_time}})
             return
 
         await callback.message.answer(f"🚀 **New Work Assigned! Your batch is open.**\nDelivering {actual_batches} batches (6 reels each)...")
@@ -989,7 +1001,6 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         await users_col.update_one(
             {"user_id": callback.from_user.id},
             {"$set": {
-                "last_work_time": now,
                 "sent_batches": sent_batches,
                 "work_approved": False,
                 "pending_second_batch": False,
@@ -3393,7 +3404,7 @@ async def work_notification_job(bot: Bot) -> None:
                 
                 # FEATURE 3: ADDED DEPARTMENT PERSONAS TO MISSED ALERTS
                 if diff_hours >= 8 and not notified_8h:
-                    msg = "⚠️ **Alert: 8 Hours Passed! [Operations Manager]**\n\nAapko work assign hue 8 ghante ho gaye hain. Bot may restrict limits soon. Please submit your work immediately!"
+                    msg = "⚠️ **Alert: 8 Hours Passed! [Operations Manager]**\n\nWe are noticing you are offline. Please go in the staff section, click on 'New Work', complete your work and submit work.\n\nPlease clear with me if you are interested, otherwise we will clear your payment and restrict your account."
                     updates = {"notified_missed_8h": True, "notified_missed_6h": True, "notified_missed_4h": True}
                 elif diff_hours >= 6 and not notified_6h:
                     msg = "⚠️ **Alert: 6 Hours Passed! [Operations Team]**\n\nAapko work assign hue 6 ghante ho gaye hain. Please submit your work soon!"
