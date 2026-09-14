@@ -221,10 +221,10 @@ async def get_daily_withdrawals() -> Tuple[List[Dict[str, Any]], int, int]:
     crypto_indices = random.sample(range(num_today), min(random.randint(2, 3), num_today))
     zero_indices = random.sample(range(num_today), min(random.randint(2, 3), num_today))
     
-    # Spread evenly across the day between 8 AM and 10 PM
+    # UPGRADED: Spread evenly across the entire 24 hour day (0 to 23) to ensure morning updates
     times = []
     for _ in range(num_today):
-        times.append(time(random.randint(8, 22), random.randint(0, 59)))
+        times.append(time(random.randint(0, 23), random.randint(0, 59)))
     times.sort()
     
     all_today_withdrawals = []
@@ -764,7 +764,7 @@ async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
         approval_date = user.get("approval_date") or user.get("join_date", datetime.now())
         now = datetime.now()
         
-        # New 4-hour cooldown logic for first work, 6-hour for next, 8-hour for all subsequent
+        # New cooldown logic: 4-hour limit for first work, 6-hour for next, 8-hour for all subsequent
         if step == 0:
             next_allowed = approval_date + timedelta(hours=4)
         elif step == 1:
@@ -898,7 +898,7 @@ async def render_submit_dashboard(callback_or_message, state: FSMContext) -> Non
         "📝 **Work Submission Panel**\n\n"
         "Please provide all required links and photos by clicking the buttons below. "
         "Once all 4 items are filled, click **Submit Work**.\n\n"
-        "*(Note: You have an 8-hour limit from your last successful submission before you can submit again.)*"
+        "*(Note: You have a 4-hour limit from your last successful submission before you can submit again.)*"
     )
 
     if isinstance(callback_or_message, CallbackQuery):
@@ -914,7 +914,7 @@ async def submit_work_dashboard_start(callback: CallbackQuery, state: FSMContext
             await callback.answer("🚫 Access Denied!", show_alert=True)
             return
 
-        # Check 8-hour limit rule logic
+        # UPGRADED: 4-hour limit rule logic for work submission
         last_sub = await submissions_col.find_one(
             {"user_id": callback.from_user.id}, 
             sort=[("timestamp", -1)]
@@ -923,8 +923,8 @@ async def submit_work_dashboard_start(callback: CallbackQuery, state: FSMContext
         if last_sub:
             if last_sub.get("status") != "denied":
                 time_since_sub = (datetime.now() - last_sub["timestamp"]).total_seconds() / 3600
-                if time_since_sub < 8:
-                    rem_hours = int(8 - time_since_sub)
+                if time_since_sub < 4:
+                    rem_hours = int(4 - time_since_sub)
                     await callback.answer(f"⏳ Limit Reached! You must wait {rem_hours} more hours before your next submission.", show_alert=True)
                     return
 
@@ -1759,9 +1759,9 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
             InlineKeyboardButton(text="✅ Accept", callback_data=f"accept_sub_{sub_id}"),
             InlineKeyboardButton(text="⏭️ Skip Payment", callback_data=f"skip_sub_{sub_id}")
         )
-        action_kb.row(InlineKeyboardButton(text="❌ Deny", callback_data=f"deny_sub_{sub_id}"))
+        # UPGRADED: Deny will now apply to all pending submissions
+        action_kb.row(InlineKeyboardButton(text="❌ Deny All Work", callback_data=f"deny_sub_{sub_id}"))
         
-        # NEW CHECK ALL AND PAYMENT BUTTON
         action_kb.row(InlineKeyboardButton(text="✅ Check All & Payment", callback_data=f"accept_all_{user_id}"))
         
         nav_row = []
@@ -1799,7 +1799,7 @@ async def admin_view_unmarked_sub(callback: CallbackQuery, bot: Bot) -> None:
     except Exception as e:
         logger.error(f"Error opening unmarked submission: {e}")
 
-# --- ACCEPT ALL & PAYMENT (NEW FEATURE) ---
+# --- ACCEPT ALL & PAYMENT ---
 @router.callback_query(F.data.startswith("accept_all_"))
 async def admin_accept_all_sub(callback: CallbackQuery, state: FSMContext) -> None:
     try:
@@ -1845,7 +1845,7 @@ async def process_all_submission_balance(message: Message, state: FSMContext, bo
         
         if target_id and amount >= 0:
             await submissions_col.update_many({"user_id": target_id, "status": "pending"}, {"$set": {"status": "accepted"}})
-            # Denying sets it true, accepting sets it true, this removes 8-hour wait
+            # Denying sets it true, accepting sets it true
             await users_col.update_one({"user_id": target_id}, {"$set": {"work_approved": True}, "$inc": {"balance": amount}})
             
             async def notify_user():
@@ -2075,6 +2075,7 @@ async def process_submission_balance(message: Message, state: FSMContext, bot: B
         logger.error(f"Error adding sub balance: {e}")
         await state.clear()
 
+# --- UPGRADED DENY LOGIC (DENY ALL + INSTANT LIMIT OPEN + PHOTO SUPPORT) ---
 @router.callback_query(F.data.startswith("deny_sub_"))
 async def admin_deny_sub(callback: CallbackQuery, state: FSMContext) -> None:
     try:
@@ -2091,7 +2092,7 @@ async def admin_deny_sub(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(AdminStates.waiting_for_deny_reason)
         await state.update_data(target_user_id=user_id, target_sub_id=sub_id)
         
-        prompt_text = "\n\n❌ **STATUS: DENYING**\n\n👉 **Please type the reason for denying this work submission:**"
+        prompt_text = "\n\n❌ **STATUS: DENYING ALL PENDING WORK**\n\n👉 **Please type the reason OR send a Photo with caption for denying this user's ALL pending work:**"
         
         try:
             if callback.message.caption:
@@ -2112,22 +2113,31 @@ async def admin_deny_sub(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(AdminStates.waiting_for_deny_reason)
 async def process_deny_reason(message: Message, state: FSMContext, bot: Bot) -> None:
     try:
-        reason = message.text.strip()
+        # Support for both Text and Photo with Caption
+        reason_text = message.caption if message.photo else message.text
+        reason = reason_text.strip() if reason_text else "No specific reason provided."
+        photo_id = message.photo[-1].file_id if message.photo else None
+        
         data = await state.get_data()
         target_id = data.get("target_user_id")
-        sub_id = data.get("target_sub_id")
         
-        if sub_id:
-            await submissions_col.update_one(
-                {"_id": ObjectId(sub_id)},
+        if target_id:
+            # UPGRADED: Deny ALL pending submissions for this user
+            await submissions_col.update_many(
+                {"user_id": target_id, "status": "pending"},
                 {"$set": {"status": "denied", "deny_reason": reason}}
             )
-        if target_id:
-            # Denying sets work_approved true to let them submit again instantly
+            
+            # UPGRADED: Instantly open work limit
             await users_col.update_one({"user_id": target_id}, {"$set": {"work_approved": True}})
+            
             async def deny_bg():
                 try:
-                    await bot.send_message(target_id, f"❌ **Work Denied!**\n\nYour recent work submission was declined.\n📝 **Reason:** {reason}\n\nYou can submit again instantly.")
+                    deny_msg = f"❌ **Work Denied!**\n\nYour pending work submissions were declined.\n📝 **Reason:** {reason}\n\nLimit instantly opened. You can submit again right away."
+                    if photo_id:
+                        await bot.send_photo(target_id, photo=photo_id, caption=deny_msg)
+                    else:
+                        await bot.send_message(target_id, deny_msg)
                 except Exception as e:
                     logger.error(f"Could not notify user {target_id}: {e}")
             asyncio.create_task(deny_bg())
@@ -2143,7 +2153,7 @@ async def process_deny_reason(message: Message, state: FSMContext, bot: Bot) -> 
         kb.row(InlineKeyboardButton(text="« Back to List", callback_data="admin_unmarked_subs_0"))
         kb.row(InlineKeyboardButton(text="🏠 Main Menu", callback_data="open_admin_panel"))
 
-        await message.reply(f"✅ Submission marked as DENIED for User `{target_id}`.\n\nPending remaining for this user: {pending_left}", parse_mode="Markdown", reply_markup=kb.as_markup())
+        await message.reply(f"✅ **ALL** pending submissions marked as DENIED for User `{target_id}`.\nInstant limit opened.\n\nPending remaining for this user: {pending_left}", parse_mode="Markdown", reply_markup=kb.as_markup())
         
     except Exception as e:
         logger.error(f"Error denying sub: {e}")
@@ -3002,9 +3012,12 @@ async def work_notification_job(bot: Bot) -> None:
                 
                 if next_allowed and now >= next_allowed:
                     try:
+                        # UPGRADED: Added Click here to download inline button
+                        dl_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Click here to download", callback_data="request_new_work")]])
                         await bot.send_message(
                             uid, 
-                            "🔔 Aapka time pura ho gaya hai aur naya batch mil gaya hai, to please Staff Only mein jao and New Work pe click karo and reels lo and post karo and wo karo."
+                            "🔔 Aapka time pura ho gaya hai aur naya batch mil gaya hai, to please Staff Only mein jao and New Work pe click karo and reels lo and post karo and wo karo.",
+                            reply_markup=dl_kb
                         )
                         await users_col.update_one({"_id": u["_id"]}, {"$set": {"notified_new_work": True}})
                     except Exception as e:
