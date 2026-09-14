@@ -236,24 +236,34 @@ async def get_daily_withdrawals() -> Tuple[List[Dict[str, Any]], int, int]:
         is_crypto = i in crypto_indices
         is_zeros = i in zero_indices
         
+        # FEATURE 2: FAKE EMP ID & UTR / TXN HASH GENERATION
+        emp_id = f"EMP-{random.randint(10000, 99999)}"
+        
         if is_crypto:
             amount = random.randint(30, 85)
             amount_str = f"{amount} Crypto"
             raw_amount = 0
+            txn_hash = f"0x{random.randint(10000000, 99999999):x}{random.randint(1000, 9999):x}"
+            utr = None
         else:
             amount = random.randint(3000, 8000)
             if is_zeros:
                 amount = (amount // 100) * 100 # Makes sure it ends in 00
             amount_str = f"₹{amount}"
             raw_amount = amount
+            txn_hash = None
+            utr = f"329{random.randint(100000000, 999999999)}"
             
         all_today_withdrawals.append({
             "name": name,
+            "emp_id": emp_id,
             "amount_str": amount_str,
             "raw_amount": raw_amount,
             "time": w_time.strftime("%H:%M"),
             "time_obj": w_time,
-            "is_crypto": is_crypto
+            "is_crypto": is_crypto,
+            "txn_hash": txn_hash,
+            "utr": utr
         })
     
     # Filter for what should be visible at this exact moment in the day
@@ -398,6 +408,7 @@ class AdminStates(StatesGroup):
     waiting_for_dp_storage_media = State()
     waiting_for_dp_bank_media = State()
     waiting_for_help_reply = State()
+    waiting_for_notice = State() # NEW FEATURE: Notice Board State
 
 # ==========================================
 # KEYBOARDS
@@ -477,11 +488,14 @@ async def get_admin_panel_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🔗 Set Proof Link", callback_data="admin_set_proof")
             ],
             [
-                InlineKeyboardButton(text=maintenance_text, callback_data="admin_toggle_maintenance"),
+                InlineKeyboardButton(text="📝 Set Notice", callback_data="admin_set_notice"), # NEW FEATURE: Set Notice
                 InlineKeyboardButton(text="💾 Backup DB", callback_data="admin_backup")
             ],
             [
-                InlineKeyboardButton(text="❌ Close Panel", callback_data="admin_close"),
+                InlineKeyboardButton(text=maintenance_text, callback_data="admin_toggle_maintenance"),
+                InlineKeyboardButton(text="❌ Close Panel", callback_data="admin_close")
+            ],
+            [
                 InlineKeyboardButton(text="🏠 Main Panel", callback_data="back_to_menu")
             ]
         ]
@@ -635,7 +649,8 @@ async def request_withdrawal(callback: CallbackQuery) -> None:
                 InlineKeyboardButton(text="🏦 UPI", callback_data="withdraw_method_upi"),
                 InlineKeyboardButton(text="🪙 Crypto", callback_data="withdraw_method_crypto")
             ],
-            [InlineKeyboardButton(text="« Back", callback_data="staff_my_section")]
+            # FEATURE 7: BUG FIX - Changed back button to back_to_menu so non-staff don't get stuck
+            [InlineKeyboardButton(text="« Back", callback_data="back_to_menu")]
         ])
         
         await safe_edit_message(callback, text, kb)
@@ -820,12 +835,14 @@ async def receive_help_message(message: Message, state: FSMContext) -> None:
         await help_queries_col.insert_one(query_doc)
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back to Dashboard", callback_data="staff_only_menu")]])
         
-        reply_msg = f"✅ **Your support ticket #TKT-{tkt_id} has been created.**\n\nOur HR team will reply within 12-24 hours."
+        # FEATURE 3: HR TEAM PERSONA
+        reply_msg = f"✅ **Your support ticket #TKT-{tkt_id} has been created.**\n\nOur **[HR & Support Team]** will reply within 12-24 hours."
         await message.reply(reply_msg, reply_markup=kb)
         await state.clear()
     except Exception as e:
         logger.error(f"Error receiving help message: {e}")
 
+# FEATURE 4: VIRTUAL ID CARD IN MY SECTION
 @router.callback_query(F.data == "staff_my_section")
 async def staff_my_section(callback: CallbackQuery) -> None:
     try:
@@ -838,17 +855,24 @@ async def staff_my_section(callback: CallbackQuery) -> None:
 
         balance = user.get("balance", 0)
         emp_id = user.get("emp_id", "N/A")
+        join_date_str = user.get("join_date", datetime.now()).strftime("%d %b %Y")
+        status_text = "ACTIVE & VERIFIED" if user.get("is_active") else "INACTIVE"
         
         text = (
-            f"👤 **My Section**\n\n"
+            f"🏢 **INSTA WORK ENTERPRISES - ID CARD**\n"
+            f"----------------------------------------\n"
             f"📛 **Name:** {clean_md(callback.from_user.first_name)}\n"
-            f"🆔 **Employee ID:** `{emp_id}`\n"
-            f"🔢 **Telegram ID:** `{callback.from_user.id}`\n"
-            f"💸 **Total Balance:** ₹{balance:,}\n\n"
+            f"🆔 **EMP ID:** `{emp_id}`\n"
+            f"📅 **Joining Date:** {join_date_str}\n"
+            f"🟢 **Status:** {status_text}\n"
+            f"----------------------------------------\n\n"
+            f"💰 **Total Balance:** ₹{balance:,}\n"
             f"*(You can request a withdrawal below once minimum limits and hours are met)*"
         )
         
+        # FEATURE 6: DAILY NOTICE BOARD BUTTON ADDED HERE
         kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📢 Notice Board", callback_data="view_notice_board")],
             [InlineKeyboardButton(text="🏦 Withdrawal", callback_data="request_withdraw")],
             [InlineKeyboardButton(text="« Back", callback_data="staff_only_menu")]
         ])
@@ -856,6 +880,20 @@ async def staff_my_section(callback: CallbackQuery) -> None:
         await safe_edit_message(callback, text, kb)
     except Exception as e:
         logger.error(f"Error in staff_my_section: {e}")
+
+# FEATURE 6: NOTICE BOARD USER HANDLER
+@router.callback_query(F.data == "view_notice_board")
+async def view_notice_board(callback: CallbackQuery) -> None:
+    try:
+        await callback.answer()
+        doc = await settings_col.find_one({"_id": "notice_board"})
+        text = doc.get("text", "No new updates or notices from the Admin at the moment.") if doc else "No new updates or notices from the Admin at the moment."
+        
+        msg = f"📢 **Daily Notice Board [Insta Work Enterprises]**\n\n{text}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="staff_my_section")]])
+        await safe_edit_message(callback, msg, kb)
+    except Exception as e:
+        logger.error(f"Error viewing notice board: {e}")
 
 @router.callback_query(F.data == "request_new_work")
 async def request_new_work(callback: CallbackQuery, bot: Bot) -> None:
@@ -1367,7 +1405,7 @@ async def send_help_reply(message: Message, state: FSMContext, bot: Bot) -> None
             await state.clear()
             return
             
-        await bot.send_message(uid, "📩 **HR Team Reply to your Help Request:**")
+        await bot.send_message(uid, "📩 **[HR & Support Team] Reply to your Help Request:**")
         await bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=message.message_id)
         
         await help_queries_col.update_one({"_id": ObjectId(qid)}, {"$set": {"status": "resolved"}})
@@ -2316,7 +2354,7 @@ async def process_submission_balance(message: Message, state: FSMContext, bot: B
         logger.error(f"Error adding sub balance: {e}")
         await state.clear()
 
-# --- UPGRADED DENY LOGIC (DENY ALL + INSTANT LIMIT OPEN + PHOTO SUPPORT) ---
+# --- UPGRADED DENY LOGIC (QA PERSONA + DENY ALL + INSTANT LIMIT OPEN + PHOTO SUPPORT) ---
 @router.callback_query(F.data.startswith("deny_sub_"))
 async def admin_deny_sub(callback: CallbackQuery, state: FSMContext) -> None:
     try:
@@ -2374,7 +2412,8 @@ async def process_deny_reason(message: Message, state: FSMContext, bot: Bot) -> 
             
             async def deny_bg():
                 try:
-                    deny_msg = f"❌ **Work Denied!**\n\nYour pending work submissions were declined.\n📝 **Reason:** {reason}\n\nLimit instantly opened. You can submit again right away."
+                    # FEATURE 5: QUALITY CHECK LANGUAGE
+                    deny_msg = f"❌ **Work Rejected by [Quality Assurance Team]**\n\nYour recent submission did not pass our quality checks.\n📝 **Reason:** {reason}\n\nPlease ensure your post views are clearly visible and resubmit immediately to avoid account penalty."
                     if photo_id:
                         await bot.send_photo(target_id, photo=photo_id, caption=deny_msg)
                     else:
@@ -3229,6 +3268,36 @@ async def admin_set_proof_save(message: Message, state: FSMContext) -> None:
     except Exception as e:
         logger.error(f"Error saving proof link: {e}")
 
+# --- FEATURE 6: NOTICE BOARD LOGIC (ADMIN SIDE) ---
+@router.callback_query(F.data == "admin_set_notice")
+async def admin_set_notice_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await callback.answer()
+        await state.set_state(AdminStates.waiting_for_notice)
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Back", callback_data="admin_cancel")]])
+        await safe_edit_message(callback, "📝 **Set Notice Board**\n\nPlease send the new notice text/update to display to all staff members:", cancel_kb)
+    except Exception as e:
+        logger.error(f"Error in admin_set_notice_prompt: {e}")
+
+@router.message(AdminStates.waiting_for_notice)
+async def admin_set_notice_save(message: Message, state: FSMContext) -> None:
+    try:
+        new_notice = message.text.strip() if message.text else ""
+        if not new_notice:
+            await message.reply("⚠️ Please send text only for the notice board.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="« Cancel", callback_data="admin_cancel")]]))
+            return
+            
+        await settings_col.update_one(
+            {"_id": "notice_board"},
+            {"$set": {"text": new_notice}},
+            upsert=True
+        )
+        await message.reply(f"✅ Notice Board updated successfully!\n\n**Preview:**\n{new_notice}", reply_markup=await get_admin_panel_keyboard())
+        await state.clear()
+        
+    except Exception as e:
+        logger.error(f"Error saving notice: {e}")
+
 @router.callback_query(F.data == "admin_cancel")
 async def admin_cancel_action(callback: CallbackQuery, state: FSMContext) -> None:
     try:
@@ -3286,9 +3355,11 @@ async def work_notification_job(bot: Bot) -> None:
                     try:
                         # UPGRADED: Added Click here to download inline button
                         dl_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Click here to download", callback_data="request_new_work")]])
+                        
+                        # FEATURE 1: FORMALIZED NEW BATCH MESSAGE
                         await bot.send_message(
                             uid, 
-                            "🔔 Aapka time pura ho gaya hai aur naya batch mil gaya hai, to please Staff Only mein jao and New Work pe click karo and reels lo and post karo and wo karo.",
+                            "🔔 **New Batch Assigned [Operations Team]**\n\nDear Employee, your cooldown period has ended. A new batch of tasks has been credited to your account. Please visit the 'Staff Only' dashboard to download and begin your work.",
                             reply_markup=dl_kb
                         )
                         await users_col.update_one({"_id": u["_id"]}, {"$set": {"notified_new_work": True}})
@@ -3308,14 +3379,15 @@ async def work_notification_job(bot: Bot) -> None:
                 updates = {}
                 msg = None
                 
+                # FEATURE 3: ADDED DEPARTMENT PERSONAS TO MISSED ALERTS
                 if diff_hours >= 8 and not notified_8h:
-                    msg = "⚠️ **Alert: 8 Hours Passed!**\n\nAapko work assign hue 8 ghante ho gaye hain. Bot may restrict limits soon. Please submit your work immediately!"
+                    msg = "⚠️ **Alert: 8 Hours Passed! [Operations Manager]**\n\nAapko work assign hue 8 ghante ho gaye hain. Bot may restrict limits soon. Please submit your work immediately!"
                     updates = {"notified_missed_8h": True, "notified_missed_6h": True, "notified_missed_4h": True}
                 elif diff_hours >= 6 and not notified_6h:
-                    msg = "⚠️ **Alert: 6 Hours Passed!**\n\nAapko work assign hue 6 ghante ho gaye hain. Please submit your work soon!"
+                    msg = "⚠️ **Alert: 6 Hours Passed! [Operations Team]**\n\nAapko work assign hue 6 ghante ho gaye hain. Please submit your work soon!"
                     updates = {"notified_missed_6h": True, "notified_missed_4h": True}
                 elif diff_hours >= 4 and not notified_4h:
-                    msg = "⚠️ **Alert: 4 Hours Passed!**\n\nAapko work assign hue 4 ghante ho chuke hain. Don't forget to submit your work."
+                    msg = "⚠️ **Alert: 4 Hours Passed! [Operations Team]**\n\nAapko work assign hue 4 ghante ho chuke hain. Don't forget to submit your work."
                     updates = {"notified_missed_4h": True}
                     
                 if msg:
@@ -3352,23 +3424,24 @@ async def payout_broadcast_job(bot: Bot) -> None:
         
         for w in to_broadcast:
             name = w["name"]
+            emp_id = w["emp_id"]
             amount_str = w["amount_str"]
             is_crypto = w["is_crypto"]
             
+            # FEATURE 2 & 3: FORMAL PAYOUT MSG WITH EMP_ID, UTR/TXN AND FINANCE TEAM
+            msg = (
+                f"🎉 **New Withdrawal Update [Finance & Billing Dept.]**\n\n"
+                f"👤 **Name:** {name}\n"
+                f"🆔 **EMP ID:** `{emp_id}`\n"
+                f"💰 **Amount:** {amount_str}\n"
+            )
+            
             if is_crypto:
-                msg = (
-                    f"🎉 **New Withdrawal Update**\n\n"
-                    f"👤 **Name:** {name}\n"
-                    f"💰 **Amount:** {amount_str}\n\n"
-                    f"✅ tumhara withdrawal successful ho chuka hai. If any issue, so please contact our admin."
-                )
+                msg += f"🔗 **TxN Hash:** `{w['txn_hash']}`\n\n"
             else:
-                msg = (
-                    f"🎉 **New Withdrawal Update**\n\n"
-                    f"👤 **Name:** {name}\n"
-                    f"💰 **Amount:** {amount_str}\n\n"
-                    f"✅ Successfully withdrawal"
-                )
+                msg += f"🏦 **UTR No:** `{w['utr']}`\n\n"
+                
+            msg += "✅ Your withdrawal is successful. If any issue, so please contact our admin."
                 
             for u in active_users:
                 try:
